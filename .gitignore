@@ -1,0 +1,28 @@
+# Data directories
+data/
+save/
+__pycache__/
+*.pyc
+*.pyo
+*.pth
+
+# Visualizations and plots
+*.png
+*.jpg
+*.jpeg
+tsne_plots/
+visualizations/
+
+# IDE
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.log
+
+# Python
+*.egg-info/
+dist/
+build/
+.eggs/
