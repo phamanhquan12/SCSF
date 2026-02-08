@@ -774,6 +774,44 @@ def get_dataset(args):
         valset, testset_final = random_split(testset, [val_size, test_final_size])
         print(f'SVHN: Train={len(trainset)}, Full_Test={test_size}, Val={val_size}, Final_Test={test_final_size}')
         
+    elif args.dataset == 'covid':
+        # COVID-QU-Ex normalization (ImageNet stats)
+        mean = (0.485, 0.456, 0.406)
+        std = (0.229, 0.224, 0.225)
+        
+        # Use 64x64 images (medical images)
+        transform_train = transforms.Compose([
+            transforms.Resize(64),
+            transforms.RandomCrop(64, padding=6),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+        transform_test = transforms.Compose([
+            transforms.Resize(64),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+        
+        # Load COVID dataset using ImageFolder
+        covid_root = os.path.join(data_root, 'covid')
+        train_path = os.path.join(covid_root, 'train')
+        val_path = os.path.join(covid_root, 'val')
+        test_path = os.path.join(covid_root, 'test')
+        
+        assert os.path.exists(train_path), f"Train folder not found: {train_path}. Run prepare_covid_dataset.py first."
+        assert os.path.exists(val_path), f"Val folder not found: {val_path}. Run prepare_covid_dataset.py first."
+        assert os.path.exists(test_path), f"Test folder not found: {test_path}. Run prepare_covid_dataset.py first."
+        
+        trainset = datasets.ImageFolder(train_path, transform=transform_train)
+        valset = datasets.ImageFolder(val_path, transform=transform_test)
+        testset = datasets.ImageFolder(test_path, transform=transform_test)
+        testset_final = testset
+        num_classes = 3  # COVID-19, Non-COVID, Normal
+        
+        print(f'COVID-QU-Ex: Train={len(trainset)}, Val={len(valset)}, Test={len(testset)}')
+        print(f'Classes: {trainset.classes}')
+        
     else:
         raise ValueError(f'Unknown dataset: {args.dataset}')
     
@@ -988,6 +1026,38 @@ def train_epoch_joint(model, trainloader, optimizer, epoch, args,
         # Auxiliary Meta-Losses (DSN companion objectives)
         def compute_aux_meta_loss(confidence, target, correctness):
             """Compute calibration loss for one auxiliary."""
+            # Frequency-based weighting: lower frequency (harder samples) get higher weight
+            # This is similar to class balancing but for correct/incorrect predictions
+            error_weight_type = calib_args.get('error_weight_type', 'fixed')  # 'fixed' or 'frequency'
+            
+            if error_weight_type == 'frequency':
+                # Compute inverse frequency weighting
+                n_correct = correctness.sum().item()
+                n_incorrect = (correctness < 0.5).sum().item()
+                n_total = len(correctness)
+                
+                if n_correct > 0 and n_incorrect > 0:
+                    # Inverse frequency: weight = n_total / (n_class * freq)
+                    # Normalized so correct samples have weight 1.0
+                    freq_correct = n_correct / n_total
+                    freq_incorrect = n_incorrect / n_total
+                    
+                    # Calculate weights (normalized by correct frequency to keep scale reasonable)
+                    weight_correct = 1.0
+                    weight_incorrect = freq_correct / freq_incorrect
+                    
+                    weights = torch.ones_like(correctness).float()
+                    weights[correctness >= 0.5] = weight_correct
+                    weights[correctness < 0.5] = weight_incorrect
+                else:
+                    # Fallback if all correct or all incorrect
+                    weights = torch.ones_like(correctness).float()
+            else:
+                # Fixed weighting (ConfidNet-style): simple multiplier for errors
+                error_weight = calib_args.get('error_weight', 1.0)  # 1.0 = no weighting, 2.0 = double weight on errors
+                weights = torch.ones_like(correctness).float()
+                weights[correctness < 0.5] *= error_weight
+            
             # Primary loss selection (mutually exclusive)
             if calib_args.get('aurc_surrogate', False):
                 # r-AURC Surrogate: directly targets AURC via soft ranking
@@ -1004,8 +1074,10 @@ def train_epoch_joint(model, trainloader, optimizer, epoch, args,
                 # Focal MSE: focus on hard samples
                 base_loss = focal_mse_loss(confidence, target.detach(), gamma=calib_args['focal'])
             else:
-                # Default: standard MSE
-                base_loss = F.mse_loss(confidence, target.detach())
+                # Default: Weighted MSE
+                # Apply per-sample weighting (frequency-based or fixed)
+                mse_per_sample = (confidence - target.detach()) ** 2
+                base_loss = (weights * mse_per_sample).mean()
             
             # Additional losses (can combine with primary)
             extra_loss = 0.0
@@ -1096,6 +1168,10 @@ def main():
     parser.add_argument('--brier', action='store_true', help='Use Brier Score instead of TCP')
     
     # Calibration Enhancements
+    parser.add_argument('--error-weight', type=float, default=1.0, metavar='W',
+                        help='Fixed error weighting: weight for incorrect predictions (default: 1.0 = no weighting, 2.0 = double weight on errors)')
+    parser.add_argument('--error-weight-type', type=str, default='fixed', choices=['fixed', 'frequency'],
+                        help='Weighting strategy: "fixed" uses --error-weight multiplier, "frequency" uses inverse frequency weighting (default: fixed)')
     parser.add_argument('--focal', type=float, default=0.0, metavar='GAMMA')
     parser.add_argument('--margin', type=float, default=0.0, metavar='M')
     parser.add_argument('--ece-reg', type=float, default=0.0, metavar='W')
@@ -1138,7 +1214,7 @@ def main():
     trainloader, valloader, testloader, testloader_full, num_classes = get_dataset(args)
     
     # Input size
-    input_size = 32  # CIFAR/SVHN
+    input_size = 64 if args.dataset == 'covid' else 32  # COVID uses 64x64
     
     # Model
     model = DS_SCSF_Model(num_classes=num_classes, input_size=input_size).to(device)
@@ -1287,6 +1363,8 @@ def main():
             
             # Calibration arguments
             calib_args = {
+                'error_weight': args.error_weight,  # Fixed multiplier for errors
+                'error_weight_type': args.error_weight_type,  # 'fixed' or 'frequency'
                 'focal': args.focal,
                 'margin': args.margin,
                 'ece_reg': args.ece_reg,
