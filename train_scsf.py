@@ -172,28 +172,32 @@ def avuc_loss(confidence, correctness, penalty_weight=2.0):
     return loss
 
 
-def compute_spatial_variance(feat):
+def nll_loss(confidence, target):
     """
-    Compute per-channel spatial variance as uncertainty signal.
+    Negative Log-Likelihood Loss for probabilistic calibration.
     
-    Hypothesis: When a network is uncertain, different spatial regions
-    of the feature map "disagree" about the classification.
-    High spatial variance = spatial disagreement = uncertainty.
+    Treats confidence as a probability and uses NLL:
+    NLL = -log(confidence) if target = 1 (correct)
+    NLL = -log(1 - confidence) if target = 0 (incorrect)
+    
+    Equivalent to binary cross-entropy but more interpretable for calibration.
+    Encourages the model to output well-calibrated probabilities.
     
     Args:
-        feat: (B, C, H, W) feature map from conv layer
+        confidence: (B,) predicted probabilities in [0, 1]
+        target: (B,) ground truth probabilities (TCP or binary correctness)
     
     Returns:
-        variance: (B, C) per-channel spatial variance
+        Scalar loss value
     """
-    # feat: (B, C, H, W)
-    # Compute mean across spatial dimensions
-    mean = feat.mean(dim=(2, 3), keepdim=True)  # (B, C, 1, 1)
+    # Add small epsilon to avoid log(0)
+    eps = 1e-7
+    confidence = torch.clamp(confidence, eps, 1 - eps)
     
-    # Compute variance across spatial dimensions
-    variance = ((feat - mean) ** 2).mean(dim=(2, 3))  # (B, C)
+    # Binary cross-entropy form of NLL
+    nll = -(target * torch.log(confidence) + (1 - target) * torch.log(1 - confidence))
     
-    return variance
+    return nll.mean()
 
 
 # Constants
@@ -276,33 +280,41 @@ class MetaCalibrator(nn.Module):
     Modes:
         - Default (detach): Post-hoc calibration, no gradients to backbone
         - End-to-end: Full gradient flow for joint feature-calibration optimization
+    
+    Architecture: 4-layer network with increasing capacity
+        - Layer 1: input_dim → 1024
+        - Layer 2: 1024 → 512
+        - Layer 3: 512 → 256
+        - Layer 4: 256 → 128
+        - Output: 128 → 1
     """
-    def __init__(self, pool4_dim=512*4, pool5_dim=512*1, logit_dim=10, hidden_dim=256, 
-                 logits_only=False, spatial_var=False, end_to_end=False):
+    def __init__(self, pool4_dim=512*4, pool5_dim=512*1, logit_dim=10, hidden_dim=256, logits_only=False, end_to_end=False):
         super().__init__()
         
         self.logits_only = logits_only
-        self.spatial_var = spatial_var
         self.end_to_end = end_to_end
         
         if logits_only:
-            input_dim = logit_dim  # Only logits (10)
-        elif spatial_var:
-            # Spatial variance: 512 (from pool4 channels) + 10 (logits) = 522
-            input_dim = 512 + logit_dim
+            input_dim = logit_dim  # Only logits
         else:
             input_dim = pool4_dim + pool5_dim + logit_dim  # 2048 + 512 + 10 = 2570
         
         self.network = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
+            nn.Linear(input_dim, 1024),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Linear(1024, 512),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(hidden_dim // 2, 1),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(128, 1),
             nn.Sigmoid()  # Output in [0, 1]
-        ) #-> conv net, attention block
+        )
         
         self._initialize_weights()
     
@@ -331,15 +343,6 @@ class MetaCalibrator(nn.Module):
                 combined = logits  # End-to-end: allow gradients
             else:
                 combined = logits.detach()  # Post-hoc: block gradients
-        elif self.spatial_var:
-            # Compute spatial variance from pool4 features
-            # pool4 shape: (B, 512, 2, 2) for 32x32 input
-            spatial_variance = compute_spatial_variance(feat_pool4)  # (B, 512)
-            
-            if self.end_to_end:
-                combined = torch.cat([spatial_variance, logits], dim=1)  # (B, 522)
-            else:
-                combined = torch.cat([spatial_variance.detach(), logits.detach()], dim=1)
         else:
             # Flatten features
             flat_pool4 = feat_pool4.view(feat_pool4.size(0), -1)  # (B, 2048)
@@ -347,7 +350,7 @@ class MetaCalibrator(nn.Module):
             
             if self.end_to_end:
                 # End-to-end: allow gradients to flow back to backbone
-                combined = torch.cat([flat_pool4, flat_pool5, logits], dim=1)  # (B, 2570)
+                combined = torch.cat([flat_pool4, flat_pool5, logits.detach()], dim=1)  # (B, 2570)
             else:
                 # Post-hoc: detach all inputs to prevent backbone modification
                 combined = torch.cat([flat_pool4.detach(), flat_pool5.detach(), logits.detach()], dim=1)
@@ -431,7 +434,8 @@ class PPOAgent:
     def select_action(self, state):
         state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
         with torch.no_grad():
-            action, log_prob = self.actor_critic.get_action(state_tensor)
+            # Use deterministic action (mean only, no sampling)
+            action, log_prob = self.actor_critic.get_action(state_tensor, deterministic=True)
         return action.cpu().numpy().squeeze(), log_prob.item() if log_prob is not None else 0.0
     
     def store_transition(self, state, action, reward, value, log_prob):
@@ -513,7 +517,7 @@ def get_dataset(args):
     - Val: 2,000 samples (for RL reward)
     - Test: remaining samples (for final evaluation)
     
-    Supported: cifar10, svhn, catsdogs
+    Supported: cifar10, svhn, catsdogs, covid
     """
     data_root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data')
     
@@ -622,6 +626,46 @@ def get_dataset(args):
         test_final_size = test_size - val_size
         valset, testset_final = random_split(testset, [val_size, test_final_size])
         print(f'Cats vs Dogs: Train={len(trainset)}, Full_Test={test_size}, Val={val_size}, Final_Test={test_final_size}')
+        
+    elif args.dataset == 'covid':
+        # COVID-QU-Ex normalization (ImageNet stats)
+        mean = (0.485, 0.456, 0.406)
+        std = (0.229, 0.224, 0.225)
+        
+        # Use 64x64 images (medical images)
+        transform_train = transforms.Compose([
+            transforms.Resize(64),
+            transforms.RandomCrop(64, padding=6),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+        transform_test = transforms.Compose([
+            transforms.Resize(64),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+        
+        # Load COVID dataset using ImageFolder
+        # Dataset should be in: data/covid/train, data/covid/val, data/covid/test
+        covid_root = os.path.join(data_root, 'covid')
+        train_path = os.path.join(covid_root, 'train')
+        val_path = os.path.join(covid_root, 'val')
+        test_path = os.path.join(covid_root, 'test')
+        
+        assert os.path.exists(train_path), f"Train folder not found: {train_path}. Run prepare_covid_dataset.py first."
+        assert os.path.exists(val_path), f"Val folder not found: {val_path}. Run prepare_covid_dataset.py first."
+        assert os.path.exists(test_path), f"Test folder not found: {test_path}. Run prepare_covid_dataset.py first."
+        
+        # Load datasets
+        trainset = datasets.ImageFolder(train_path, transform=transform_train)
+        valset = datasets.ImageFolder(val_path, transform=transform_test)
+        testset = datasets.ImageFolder(test_path, transform=transform_test)
+        testset_final = testset  # Use test set for final evaluation
+        num_classes = 3  # COVID-19, Non-COVID, Normal
+        
+        print(f'COVID-QU-Ex: Train={len(trainset)}, Val={len(valset)}, Test={len(testset)}')
+        print(f'Classes: {trainset.classes}')
         
     else:
         raise ValueError(f'Unknown dataset: {args.dataset}')
@@ -837,6 +881,7 @@ def train_epoch_joint(model, meta_cal, trainloader, optimizer, meta_optimizer,
     Meta-Loss options:
       - TCP (default): MSE(ĉ(x), TCP) where TCP = p(y*|x) = softmax(logits)[target]
       - Brier Score: MSE(ĉ(x), correctness) where correctness = 1 if pred==target else 0
+      - NLL: Negative Log-Likelihood for probabilistic calibration
     
     Calibration Enhancement Options:
       - focal: Focal MSE loss (focus on hard samples)
@@ -844,6 +889,7 @@ def train_epoch_joint(model, meta_cal, trainloader, optimizer, meta_optimizer,
       - ece_reg: Soft ECE regularization
       - label_smooth: Label smoothing for TCP target
       - avuc: AVUC loss (penalize overconfident wrong predictions)
+      - nll: Use NLL loss instead of MSE (probabilistic calibration)
     
     Args:
         track_grads: If True, compute and return gradient norm statistics
@@ -892,11 +938,48 @@ def train_epoch_joint(model, meta_cal, trainloader, optimizer, meta_optimizer,
                 probs = F.softmax(logits, dim=1)
                 meta_target = probs.gather(1, targets.unsqueeze(1)).squeeze(1)
         
-        # Primary Meta-Loss: MSE or Focal MSE
-        if calib_args.get('focal', 0) > 0:
+        # Weighting strategy for MSE loss (from DS-SCSF)
+        error_weight_type = calib_args.get('error_weight_type', 'fixed')  # 'fixed' or 'frequency'
+        
+        if error_weight_type == 'frequency':
+            # Compute inverse frequency weighting
+            n_correct = correctness.sum().item()
+            n_incorrect = (correctness < 0.5).sum().item()
+            n_total = len(correctness)
+            
+            if n_correct > 0 and n_incorrect > 0:
+                # Inverse frequency: weight = n_total / (n_class * freq)
+                # Normalized so correct samples have weight 1.0
+                freq_correct = n_correct / n_total
+                freq_incorrect = n_incorrect / n_total
+                
+                # Calculate weights (normalized by correct frequency to keep scale reasonable)
+                weight_correct = 1.0
+                weight_incorrect = freq_correct / freq_incorrect
+                
+                weights = torch.ones_like(correctness).float()
+                weights[correctness >= 0.5] = weight_correct
+                weights[correctness < 0.5] = weight_incorrect
+            else:
+                # Fallback if all correct or all incorrect
+                weights = torch.ones_like(correctness).float()
+        else:
+            # Fixed weighting (ConfidNet-style): simple multiplier for errors
+            error_weight = calib_args.get('error_weight', 1.0)  # 1.0 = no weighting, 2.0 = double weight on errors
+            weights = torch.ones_like(correctness).float()
+            weights[correctness < 0.5] *= error_weight
+        
+        # Primary Meta-Loss: NLL, MSE, or Focal MSE
+        if calib_args.get('nll', False):
+            # Negative Log-Likelihood for probabilistic calibration
+            meta_loss = nll_loss(confidence, meta_target.detach())
+        elif calib_args.get('focal', 0) > 0:
             meta_loss = focal_mse_loss(confidence, meta_target.detach(), gamma=calib_args['focal'])
         else:
-            meta_loss = F.mse_loss(confidence, meta_target.detach())
+            # Default: Weighted MSE
+            # Apply per-sample weighting (frequency-based or fixed)
+            mse_per_sample = (confidence - meta_target.detach()) ** 2
+            meta_loss = (weights * mse_per_sample).mean()
         
         # Additional calibration losses
         calib_loss = 0.0
@@ -985,8 +1068,6 @@ def main():
                         help='Use Brier Score (confidence vs correctness) instead of MSE on TCP')
     parser.add_argument('--logits-only', action='store_true',
                         help='Meta-Calibrator uses only logits as input (no pooled features)')
-    parser.add_argument('--spatial-var', action='store_true',
-                        help='Use spatial variance of features as uncertainty signal (replaces pooled features)')
     parser.add_argument('--end-to-end', action='store_true',
                         help='Enable full end-to-end training (no detach, gradients flow to backbone)')
     
@@ -1001,6 +1082,14 @@ def main():
                         help='Label smoothing for TCP target (default: 0 = disabled, try 0.1)')
     parser.add_argument('--avuc', type=float, default=0.0, metavar='W',
                         help='Add AVUC loss (penalize overconf wrong) with weight W (default: 0, try 1.0)')
+    parser.add_argument('--nll', action='store_true',
+                        help='Use NLL (Negative Log-Likelihood) loss instead of MSE for probabilistic calibration')
+    
+    # MSE Weighting Strategy (from DS-SCSF)
+    parser.add_argument('--error-weight', type=float, default=1.0, metavar='W',
+                        help='Fixed error weighting: weight for incorrect predictions (default: 1.0 = no weighting, 2.0 = double weight on errors)')
+    parser.add_argument('--error-weight-type', type=str, default='fixed', choices=['fixed', 'frequency'],
+                        help='Weighting strategy: "fixed" uses --error-weight multiplier, "frequency" uses inverse frequency weighting (default: fixed)')
     
     # Meta-Calibrator
     parser.add_argument('--meta-lr', default=1e-3, type=float)
@@ -1008,8 +1097,6 @@ def main():
     # Misc
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--gpu', default='0', type=str)
-    parser.add_argument('--eval-only', action='store_true',
-                        help='Load pretrained weights and evaluate only (no training)')
     
     args = parser.parse_args()
     
@@ -1028,7 +1115,7 @@ def main():
     trainloader, valloader, testloader, testloader_full, num_classes = get_dataset(args)
     
     # Determine input size based on dataset
-    input_size = 64 if args.dataset == 'catsdogs' else 32
+    input_size = 64 if args.dataset in ['catsdogs', 'covid'] else 32
     
     # Model: VGG16_bn with C outputs (NO reservation!)
     model = VGG16BN_FeatureExtractor(num_classes=num_classes, input_size=input_size).to(device)
@@ -1050,7 +1137,6 @@ def main():
         logit_dim=num_classes,
         hidden_dim=256,
         logits_only=args.logits_only,
-        spatial_var=args.spatial_var,
         end_to_end=args.end_to_end
     ).to(device)
     
@@ -1080,8 +1166,6 @@ def main():
     suffix = ''
     if args.logits_only:
         suffix += '_logitsonly'
-    if args.spatial_var:
-        suffix += '_spatialvar'
     if args.brier:
         suffix += '_brier'
     if args.focal > 0:
@@ -1094,13 +1178,19 @@ def main():
         suffix += f'_ls{args.label_smooth}'
     if args.avuc > 0:
         suffix += f'_avuc{args.avuc}'
+    if args.nll:
+        suffix += '_nll'
     if args.end_to_end:
         suffix += '_e2e'
+    if args.error_weight_type == 'frequency':
+        suffix += '_freqweight'
+    elif args.error_weight != 1.0:
+        suffix += f'_ew{args.error_weight}'
     if args.no_rl:
         suffix += '_norl'
     if args.seed != 42:
         suffix += f'_seed{args.seed}'
-    save_dir = f'./save/{args.dataset}/vgg16_bn_scsf{suffix}'
+    save_dir = f'./save/{args.dataset}/vgg16_bn_scsf{suffix}_4_layers'
     os.makedirs(save_dir, exist_ok=True)
     
     logger = Logger(os.path.join(save_dir, 'log.txt'))
@@ -1122,55 +1212,6 @@ def main():
     prev_aurc = None
     
     # ==========================================================================
-    # Evaluation-Only Mode
-    # ==========================================================================
-    if args.eval_only:
-        print(f'\n{"="*80}')
-        print('EVALUATION MODE: Loading pretrained weights')
-        print(f'{"="*80}')
-        
-        checkpoint_path = os.path.join(save_dir, '300.pth')
-        if not os.path.exists(checkpoint_path):
-            print(f'Error: Checkpoint not found at {checkpoint_path}')
-            sys.exit(1)
-        
-        checkpoint = torch.load(checkpoint_path)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        meta_cal.load_state_dict(checkpoint['meta_cal_state_dict'])
-        print(f'Loaded checkpoint: {checkpoint_path}')
-        print(f'Save directory: {save_dir}')
-        print(f'{"="*80}\n')
-        
-        # Run evaluation
-        model.eval()
-        meta_cal.eval()
-        
-        coverage_points = torch.linspace(0.0, 1.0, 500)
-        _, _, test_aurc, test_conf, _ = evaluate_selective_risk(
-            model, meta_cal, testloader, coverage_points, device
-        )
-        
-        # Calculate test error at full coverage
-        test_err = 0
-        total = 0
-        with torch.no_grad():
-            for inputs, targets in testloader:
-                inputs, targets = inputs.to(device), targets.to(device)
-                logits, _, _ = model(inputs, return_features=True)
-                _, preds = logits.max(dim=1)
-                test_err += (~preds.eq(targets)).sum().item()
-                total += targets.size(0)
-        test_err = (test_err / total) * 100
-        
-        print(f'\n{"="*80}')
-        print(f'Test Error: {test_err:.2f}%')
-        print(f'Test AURC:  {test_aurc:.6f}')
-        print(f'Mean Conf:  {test_conf:.3f}')
-        print(f'{"="*80}')
-        
-        sys.exit(0)
-    
-    # ==========================================================================
     # Training Loop
     # ==========================================================================
     
@@ -1178,23 +1219,25 @@ def main():
     print('SCSF: Self-Calibrated Selective Framework')
     print(f'{"="*80}')
     print(f'Model: VGG16_bn with C={num_classes} outputs (NO reservation neuron)')
-    if args.logits_only:
-        meta_input = 'Logits only (10 dims)'
-    elif args.spatial_var:
-        meta_input = 'Spatial Variance (512) + Logits (10) = 522 dims'
-    else:
-        meta_input = 'Pool4 (2048) + Pool5 (512) + Logits (10) = 2570 dims'
+    meta_input = 'Logits only' if args.logits_only else 'Pool4 + Pool5 + Logits'
     print(f'Meta-Calibrator Input: {meta_input}')
-    meta_loss_type = 'Brier Score (correctness)' if args.brier else 'TCP (true class probability)'
+    
+    # Determine meta-loss type based on flags
+    if args.nll:
+        meta_loss_type = 'NLL (Negative Log-Likelihood - Probabilistic)'
+    elif args.brier:
+        meta_loss_type = 'Brier Score (correctness)'
+    else:
+        meta_loss_type = 'TCP (true class probability)'
     print(f'Meta-Loss Type: {meta_loss_type}')
     
-    # Print training mode status
+    # Print end-to-end mode status
     if args.end_to_end:
         print(f'Training Mode: END-TO-END (full gradient flow to backbone)')
     else:
-        print(f'Training Mode: Training-aware (backbone evolves, meta adapts w/ decoupled gradients)')
+        print(f'Training Mode: Post-hoc (gradients blocked from backbone)')
     
-    # Print calibration enhancements
+    # Print calibration enhancements (additional losses beyond primary meta-loss)
     calib_opts = []
     if args.focal > 0:
         calib_opts.append(f'Focal(gamma={args.focal})')
@@ -1206,10 +1249,20 @@ def main():
         calib_opts.append(f'LabelSmooth({args.label_smooth})')
     if args.avuc > 0:
         calib_opts.append(f'AVUC(w={args.avuc})')
+    # Note: NLL is shown in Meta-Loss Type above, not here
     if calib_opts:
-        print(f'Calibration Enhancements: {" + ".join(calib_opts)}')
+        print(f'Additional Calibration Losses: {" + ".join(calib_opts)}')
     else:
-        print('Calibration Enhancements: None (baseline MSE)')
+        if not args.nll and args.focal == 0:
+            print('Additional Calibration Losses: None (baseline MSE)')
+    
+    # Print weighting strategy
+    if args.error_weight_type == 'frequency':
+        print(f'MSE Weighting Strategy: Inverse Frequency (automatic balancing)')
+    elif args.error_weight != 1.0:
+        print(f'MSE Weighting Strategy: Fixed (error_weight={args.error_weight})')
+    else:
+        print(f'MSE Weighting Strategy: None (uniform weighting)')
     
     print(f'Phase 1 (Epoch 1-{args.pretrain}): Cross-Entropy Warmup')
     if args.no_rl:
@@ -1249,6 +1302,9 @@ def main():
                 'ece_reg': args.ece_reg,
                 'label_smooth': args.label_smooth,
                 'avuc': args.avuc,
+                'nll': args.nll,
+                'error_weight': args.error_weight,
+                'error_weight_type': args.error_weight_type,
             }
             
             # Track gradients for end-to-end mode
