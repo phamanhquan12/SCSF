@@ -1,104 +1,133 @@
-# SCSF: Self-Calibrated Selective Framework
-
-A training-aware calibration framework for selective classification that improves upon Deep Gamblers baseline.
+# SCSF: Selective Classification with Supervised Features
 
 ## Overview
 
-SCSF (Self-Calibrated Selective Framework) is a novel approach to selective classification that:
-- Uses a **Meta-Calibrator** network to predict confidence scores
-- Employs **RL-based hyperparameter tuning** for threshold and loss weighting
-- Supports **training-aware calibration** where backbone and meta-calibrator evolve together
-- Achieves **10-15% improvement** in AURC over Deep Gamblers baseline
+SCSF replaces the reservation-class approach (e.g., Deep Gamblers' C+1 neuron) with a post-hoc **MetaCalibrator** that predicts True Class Probability (TCP) from intermediate backbone features. The backbone trains normally with cross-entropy; the MetaCalibrator learns to score confidence using supervised features from two late pooling layers plus the logit vector.
 
-## Key Features
+Key design choices:
+- **No reservation neuron** — standard C-class output, no architecture modification
+- **Post-hoc MetaCalibrator** — gradients are detached from the backbone; only the MLP is trained on the meta-loss
+- **Cosine-decay meta-weight** — λ decays from 1.0 → 1e-4 over the joint phase, no RL or learned weighting needed
+- **m=2 intermediate layers** — pool4 + pool5 (VGG16-BN) or layer3 + layer4 (ResNet-18)
 
-| Feature | Description |
-|---------|-------------|
-| Meta-Calibrator | MLP that takes pool4/pool5 features + logits to predict calibrated confidence |
-| RL Controller | PPO agent that dynamically adjusts rejection threshold and meta-loss weight |
-| Training-aware | Backbone continues training while meta-calibrator adapts (decoupled gradients) |
-| End-to-end mode | Optional full gradient flow for joint optimization |
-| Spatial Variance | Alternative uncertainty signal using per-channel feature variance |
+## Requirements
 
-## Installation
-
-```bash
-pip install torch torchvision numpy
+```
+torch >= 1.10
+torchvision
+numpy
 ```
 
 ## Usage
 
-### Train SCSF (default configuration)
+### Standard benchmarks (CIFAR-10, SVHN, Cats vs Dogs)
+
+Uses VGG16-BN backbone via `train_scsf.py`:
+
 ```bash
-python train_scsf.py -d cifar10 --epochs 300 --pretrain 100 --seed 42
+# CIFAR-10 (paper configuration)
+python train_scsf.py -d cifar10 \
+    --epochs 300 --pretrain 100 \
+    --meta-weight-mode decay --init-meta-weight 1.0 --min-meta-weight 0.001 \
+    --error-weight 1.0 --seed 42
+
+# SVHN
+python train_scsf.py -d svhn \
+    --epochs 300 --pretrain 100 \
+    --meta-weight-mode decay --init-meta-weight 1.0 --min-meta-weight 0.001 \
+    --seed 42
+
+# Cats vs Dogs (64×64 input)
+python train_scsf.py -d catsdogs \
+    --epochs 300 --pretrain 100 \
+    --meta-weight-mode decay --init-meta-weight 1.0 --min-meta-weight 0.001 \
+    --seed 42
 ```
 
-### Train with End-to-End gradient flow
+<!-- ### Medical datasets
+
+Each medical dataset has a self-contained script with ResNet-18 backbone (trained from scratch, no ImageNet pretraining). All use cosine-decay meta-weight and error_weight=10:
+
 ```bash
-python train_scsf.py -d cifar10 --epochs 300 --pretrain 100 --end-to-end --seed 42
+python scsf_brain_tumor.py        # Brain Tumor MRI (4 classes, 200 epochs)
+python scsf_chest_xray.py         # Chest X-Ray Pneumonia (2 classes)
+python scsf_malaria.py            # Malaria Cell Images (2 classes, 100 epochs)
+python scsf_alzheimer_tpu.py      # Alzheimer's MRI (4 classes, 100 epochs)
+python scsf_oct.py                # OCT Retinal (4 classes, 200 epochs)
+python scsf_idrid.py              # IDRiD Diabetic Retinopathy (5 classes, 200 epochs)
+python scsf_busi_tpu.py           # Breast Ultrasound (3 classes, 100 epochs)
+python scsf_oasis_alzheimer.py    # OASIS Alzheimer's (4 classes, multi-trial)
+python scsf_brain_tumor_tpu.py    # Brain Tumor MRI (TPU variant)
 ```
 
-### Train with Spatial Variance features
+### Baselines
+
+Deep Gamblers and SelectiveNet baselines are run from the parent directory:
+
 ```bash
-python train_scsf.py -d cifar10 --epochs 300 --pretrain 100 --spatial-var --seed 42
+cd ..
+python main.py -d cifar10 --epochs 300 -o 2.2   # Deep Gamblers
 ```
 
-### Evaluate with multiple trials
+SAT baselines for medical datasets:
+
 ```bash
-python eval_scsf_multi_trial.py --checkpoint ./save/cifar10/vgg16_bn_scsf/300.pth -d cifar10 --seeds 42 10 300
+python sat_brain_tumor.py
+python sat_chest_xray.py
+python sat_malaria.py
+python sat_alzheimer_tpu.py
+python sat_idrid.py
+python sat_busi_tpu.py
 ```
 
-## Results (CIFAR-10)
+### Ablation (layer selection)
 
-| Method | AURC (mean±std) | Improvement |
-|--------|-----------------|-------------|
-| Deep Gamblers Baseline | 0.006903 | - |
-| SCSF (TCP + RL) | 0.005875 ± 0.000243 | +14.9% |
-| SCSF End-to-End | 0.006191 ± 0.000243 | +10.3% |
-| SCSF Spatial Variance | 0.0063 | +8.7% |
+```bash
+python ablation_layer_selection.py
+```
 
 ## Architecture
 
 ```
 Input Image
     ↓
-VGG16_bn Backbone (with intermediate feature extraction)
-    ↓
-┌─────────────────────────────────────────────────────┐
-│ Pool4 Features (512×2×2) + Pool5 Features (512×1×1) │
-│              + Logits (10)                          │
-└─────────────────────────────────────────────────────┘
-    ↓
-Meta-Calibrator MLP
-    ↓
-Calibrated Confidence ĉ(x) ∈ [0, 1]
-    ↓
-RL Controller (PPO) adjusts τ and meta_weight
+Backbone (VGG16-BN or ResNet-18, standard C-class output)
+    ├── layer_m-1 features ──┐
+    ├── layer_m features ────┼──→ [flatten + concat] → MetaCalibrator MLP → ĉ(x) ∈ [0,1]
+    └── logits (C-dim) ──────┘
+                                        ↓
+                              Reject if ĉ(x) < τ
 ```
+
+**MetaCalibrator**: 5-layer MLP (D → 1024 → 512 → 256 → 128 → 1), ReLU + Dropout(0.3), Sigmoid output, Xavier init.
+
+**Training protocol**:
+1. **Phase 1** (warmup): Train backbone with CE only
+2. **Phase 2** (joint): Train backbone with CE + λ · MSE(ĉ(x), TCP), where λ follows cosine decay
 
 ## File Structure
 
 ```
-├── train_scsf.py          # Main training script
-├── eval_scsf_multi_trial.py   # Multi-seed evaluation
-├── models/                # VGG model definitions
-│   └── cifar/
-│       └── vgg.py
+rl_reward/
+├── train_scsf.py              # Standard benchmarks (VGG16-BN)
+├── scsf_brain_tumor.py        # Medical: Brain Tumor MRI
+├── scsf_chest_xray.py         # Medical: Chest X-Ray
+├── scsf_malaria.py            # Medical: Malaria
+├── scsf_alzheimer_tpu.py      # Medical: Alzheimer's
+├── scsf_oct.py                # Medical: OCT Retinal
+├── scsf_idrid.py              # Medical: IDRiD DR
+├── scsf_busi_tpu.py           # Medical: Breast Ultrasound
+├── scsf_oasis_alzheimer.py    # Medical: OASIS Alzheimer's
+├── scsf_brain_tumor_tpu.py    # Medical: Brain Tumor (TPU)
+├── sat_*.py                   # SAT baselines
+├── ablation_layer_selection.py# Layer selection ablation
 └── README.md
-```
-
-## Citation
-
-If you use this code, please cite:
-
-```bibtex
-@inproceedings{scsf2026,
-  title={Self-Calibrated Selective Framework for Selective Classification},
-  author={...},
-  booktitle={...},
-  year={2026}
-}
-```
+../
+├── main.py                    # Deep Gamblers / SelectiveNet baseline
+├── dataset_utils.py           # Cats vs Dogs resizing utility
+├── models/cifar/vgg.py        # VGG16-BN architecture
+└── utils/                     # Logger, Bar, AverageMeter
+``` -->
 
 ## License
 
