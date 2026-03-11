@@ -8,8 +8,8 @@ the Gambler's Loss with a learned confidence scorer.
 
 Key Innovations:
   1. NO C+1 reservation neuron - pure C=10 classification
-  2. Meta-Calibrator predicts True Class Probability (TCP)
-  3. RL Controller tunes decision threshold τ
+  2. Meta-Calibrator predicts True Class Probability (TCP), penalized using NLL
+  3. RL Controller tunes decision threshold τ (not used anymore)
   4. Confidence = Meta-Calibrator output (not softmax max)
 
 Architecture:
@@ -200,6 +200,166 @@ def nll_loss(confidence, target):
     return nll.mean()
 
 
+# =============================================================================
+# Meta-Weight Scheduling (RL-free alternatives)
+# =============================================================================
+
+def get_meta_weight_cosine(epoch, pretrain, total_epochs, max_weight):
+    """
+    Cosine warmup schedule: smoothly ramps meta_loss_weight from 0 → max_weight.
+    
+    weight(t) = max_weight * 0.5 * (1 - cos(π * progress))
+    
+    Produces: 0 → max_weight over Phase 2 with slow-fast-slow dynamics.
+    Fully deterministic, no variance between runs.
+    """
+    if epoch <= pretrain:
+        return 0.0
+    progress = (epoch - pretrain) / (total_epochs - pretrain)
+    return max_weight * 0.5 * (1 - math.cos(math.pi * progress))
+
+
+def get_meta_weight_linear(epoch, pretrain, total_epochs, max_weight):
+    """
+    Linear warmup schedule: linearly ramps meta_loss_weight from 0 → max_weight.
+    
+    weight(t) = max_weight * progress
+    
+    Simple and predictable. Fully deterministic.
+    """
+    if epoch <= pretrain:
+        return 0.0
+    progress = (epoch - pretrain) / (total_epochs - pretrain)
+    return max_weight * progress
+
+
+def get_meta_weight_step(epoch, pretrain, total_epochs, max_weight, warmup_fraction=0.1):
+    """
+    Step schedule with short linear warmup then constant.
+    
+    First warmup_fraction of Phase 2: linear ramp 0 → max_weight
+    Remaining: constant max_weight
+    
+    Good when you want max_weight for most of training but avoid
+    the initial shock of suddenly adding meta-loss.
+    """
+    if epoch <= pretrain:
+        return 0.0
+    phase2_len = total_epochs - pretrain
+    warmup_epochs = max(1, int(phase2_len * warmup_fraction))
+    phase2_epoch = epoch - pretrain
+    if phase2_epoch <= warmup_epochs:
+        return max_weight * phase2_epoch / warmup_epochs
+    return max_weight
+
+
+def get_meta_weight_decay(epoch, pretrain, total_epochs, start_weight, min_weight=1e-4):
+    """
+    Cosine decay schedule: smoothly decays meta_loss_weight from start_weight → min_weight.
+    
+    weight(t) = min_weight + 0.5 * (start_weight - min_weight) * (1 + cos(π * progress))
+    
+    Produces: start_weight → min_weight over Phase 2 with slow-fast-slow dynamics.
+    The weight never goes below min_weight (hard floor).
+    Fully deterministic, no variance between runs.
+    """
+    if epoch <= pretrain:
+        return start_weight
+    progress = (epoch - pretrain) / (total_epochs - pretrain)
+    weight = min_weight + 0.5 * (start_weight - min_weight) * (1 + math.cos(math.pi * progress))
+    return max(weight, min_weight)
+
+
+class AdaptiveMetaWeight:
+    """
+    Validation-based adaptive controller for meta_loss_weight.
+    
+    Deterministic rule-based adjustment (no exploration noise):
+      - If val AURC improves → increase weight (meta-calibrator is helping)
+      - If val AURC stagnates for `patience` checks → decrease weight
+    
+    Compared to RL:
+      - Fully deterministic given same validation results
+      - No exploration noise, no policy initialization variance
+      - Simple and interpretable
+    """
+    def __init__(self, init_weight=1.0, min_weight=0.1, max_weight=3.0,
+                 increase_factor=1.05, decrease_factor=0.90, patience=3):
+        self.weight = init_weight
+        self.min_weight = min_weight
+        self.max_weight = max_weight
+        self.increase_factor = increase_factor
+        self.decrease_factor = decrease_factor
+        self.patience = patience
+        self.mean_aurc = float('inf')
+        self.no_improve_count = 0
+    
+    def step(self, val_aurc):
+        """Update weight based on validation AURC. Returns new weight."""
+        if val_aurc < self.mean_aurc:
+            # Improved - increase weight
+            self.mean_aurc = val_aurc
+            self.weight = min(self.weight * self.increase_factor, self.max_weight)
+            self.no_improve_count = 0
+        else:
+            self.no_improve_count += 1
+            if self.no_improve_count >= self.patience:
+                # Stagnated - decrease weight
+                self.weight = max(self.weight * self.decrease_factor, self.min_weight)
+                self.no_improve_count = 0
+        return self.weight
+
+
+class LearnedMetaWeight(nn.Module):
+    """
+    Differentiable meta_loss_weight with softplus anti-collapse barrier.
+    
+    Parameterized via log-variance (Kendall et al., 2018 inspired):
+      effective_weight = 0.5 * exp(-log_var)  (always > 0)
+    
+    Loss contribution:
+      L_meta = effective_weight * meta_loss + softplus(log_var)
+    
+    Why the previous exp(log_weight) approach collapsed:
+      With L = CE + w * meta_loss, ∂L/∂w = meta_loss > 0 ALWAYS.
+      Gradient descent always pushes w → 0 because reducing weight
+      trivially reduces total loss. No amount of weight decay can
+      counter this (meta_loss gradient is ~1000x stronger).
+    
+    Softplus barrier prevents collapse:
+      - softplus(log_var) ≥ 0 always (no negative loss!)
+      - When weight is tiny (log_var → +∞): barrier ≈ log_var (grows!)
+      - When weight is large (log_var → -∞): barrier ≈ exp(log_var) ≈ 0
+    
+    Natural equilibrium (gradient = 0):
+      0.5 * exp(-log_var) * meta_loss = sigmoid(log_var)
+      → weight auto-adjusts: small meta_loss → higher weight, large → lower
+      → weight * meta_loss stays roughly constant (self-balancing)
+    """
+    def __init__(self, init_weight=1.0):
+        super().__init__()
+        # effective_weight = 0.5 * exp(-log_var) = init_weight
+        # → log_var = -log(2 * init_weight)
+        init_log_var = -math.log(2.0 * max(init_weight, 1e-4))
+        self.log_var = nn.Parameter(torch.tensor(init_log_var))
+    
+    def forward(self, meta_loss):
+        """
+        Returns: effective_weight * meta_loss + softplus(log_var)
+        Both terms ≥ 0, total is always non-negative.
+        """
+        precision = torch.exp(-self.log_var)  # 1/σ²
+        weighted = 0.5 * precision * meta_loss
+        # Anti-collapse barrier: ≥ 0, grows when weight shrinks
+        barrier = F.softplus(self.log_var)
+        return weighted + barrier
+    
+    @property
+    def effective_weight(self):
+        """Current effective weight = 1/(2σ²) for logging."""
+        return (0.5 * torch.exp(-self.log_var)).item()
+
+
 # Constants
 CIFAR10_CLASSES = ['airplane', 'automobile', 'bird', 'cat', 'deer',
                    'dog', 'frog', 'horse', 'ship', 'truck']
@@ -217,6 +377,11 @@ class VGG16BN_FeatureExtractor(nn.Module):
     Wrapper around original VGG16_bn to expose intermediate features.
     Uses EXACTLY C outputs (no C+1 reservation neuron).
     Supports both 32x32 (CIFAR/SVHN) and 64x64 (Cats vs Dogs) inputs.
+
+    GAP is applied to pool4 and pool5 feature maps so the MetaCalibrator
+    receives compact channel-wise descriptors:
+      pool4 → (B, 512)   |   pool5 → (B, 512)
+    regardless of spatial resolution.
     """
     def __init__(self, num_classes=10, input_size=32):
         super().__init__()
@@ -224,6 +389,7 @@ class VGG16BN_FeatureExtractor(nn.Module):
         # Use original VGG16_bn from Deep Gamblers
         self.base_model = vgg.vgg16_bn(num_classes=num_classes, input_size=input_size)
         self.input_size = input_size
+        self.gap = nn.AdaptiveAvgPool2d((2, 2))   # shared GAP for features
         
         # Find MaxPool indices
         self._find_pool_indices()
@@ -256,6 +422,15 @@ class VGG16BN_FeatureExtractor(nn.Module):
         x = x.view(x.size(0), -1)
         logits = self.base_model.classifier(x)
         
+        # Conditional pooling: reduce to 2×2 only if spatial > 2, else keep
+        if feat_pool4.size(2) > 2 or feat_pool4.size(3) > 2:
+            feat_pool4 = self.gap(feat_pool4)
+        feat_pool4 = feat_pool4.view(feat_pool4.size(0), -1)
+
+        if feat_pool5.size(2) > 2 or feat_pool5.size(3) > 2:
+            feat_pool5 = self.gap(feat_pool5)
+        feat_pool5 = feat_pool5.view(feat_pool5.size(0), -1)
+        
         return logits, feat_pool4, feat_pool5
 
 
@@ -267,28 +442,25 @@ class MetaCalibrator(nn.Module):
     """
     Meta-Calibrator: Predicts True Class Probability (TCP).
     
-    Input: Concatenated features from:
+    Input: Concatenated features (pooled to ≤2×2) from:
       - Pool4 (512×2×2 = 2048-dim)
-      - Pool5 (512×1×1 = 512-dim)  
-      - Logits (10-dim)
+      - Pool5 (512×H×W, kept or reduced to ≤2×2)
+      - Logits (C-dim)
+    
+    Pooling strategy: if spatial > 2×2 → AdaptiveAvgPool2d(2,2), else keep.
+    For 32×32 input: pool4=2048, pool5=512  → total=2560+C
+    For 64×64 input: pool4=2048, pool5=2048 → total=4096+C
     
     Output: Confidence score ĉ(x) ∈ [0, 1]
     
-    Target: TCP = p(y*|x) = softmax(logits)[y*]
-    Loss: MSE(ĉ(x), TCP)
-    
-    Modes:
-        - Default (detach): Post-hoc calibration, no gradients to backbone
-        - End-to-end: Full gradient flow for joint feature-calibration optimization
-    
-    Architecture: 4-layer network with increasing capacity
+    Architecture: 5-layer network
         - Layer 1: input_dim → 1024
         - Layer 2: 1024 → 512
         - Layer 3: 512 → 256
         - Layer 4: 256 → 128
         - Output: 128 → 1
     """
-    def __init__(self, pool4_dim=512*4, pool5_dim=512*1, logit_dim=10, hidden_dim=256, logits_only=False, end_to_end=False):
+    def __init__(self, pool4_dim=512*4, pool5_dim=512, logit_dim=10, hidden_dim=256, logits_only=False, end_to_end=False):
         super().__init__()
         
         self.logits_only = logits_only
@@ -327,9 +499,9 @@ class MetaCalibrator(nn.Module):
     def forward(self, feat_pool4, feat_pool5, logits):
         """
         Args:
-            feat_pool4: (B, 512, 2, 2) or None if logits_only
-            feat_pool5: (B, 512, 1, 1) or None if logits_only
-            logits: (B, 10)
+            feat_pool4: (B, D4) — flattened pool4 features (≤2×2 spatial)
+            feat_pool5: (B, D5) — flattened pool5 features (≤2×2 spatial)
+            logits: (B, C)
         Returns:
             confidence: (B,) in [0, 1]
         
@@ -344,16 +516,13 @@ class MetaCalibrator(nn.Module):
             else:
                 combined = logits.detach()  # Post-hoc: block gradients
         else:
-            # Flatten features
-            flat_pool4 = feat_pool4.view(feat_pool4.size(0), -1)  # (B, 2048)
-            flat_pool5 = feat_pool5.view(feat_pool5.size(0), -1)  # (B, 512)
-            
+            # Features already flattened from extractor
             if self.end_to_end:
                 # End-to-end: allow gradients to flow back to backbone
-                combined = torch.cat([flat_pool4, flat_pool5, logits.detach()], dim=1)  # (B, 2570)
+                combined = torch.cat([feat_pool4, feat_pool5,logits], dim=1)
             else:
                 # Post-hoc: detach all inputs to prevent backbone modification
-                combined = torch.cat([flat_pool4.detach(), flat_pool5.detach(), logits.detach()], dim=1)
+                combined = torch.cat([feat_pool4, feat_pool5, logits.detach()], dim=1)
         
         # Predict confidence
         confidence = self.network(combined).squeeze(-1)  # (B,)
@@ -874,16 +1043,17 @@ def compute_gradient_norms(model):
 
 
 def train_epoch_joint(model, meta_cal, trainloader, optimizer, meta_optimizer, 
-                      meta_loss_weight, device, use_brier=False, calib_args=None, track_grads=False):
+                      meta_loss_weight, device, use_brier=False, calib_args=None, track_grads=False,
+                      extra_optimizers=None):
     """
     Phase 2: Joint training with CE + Meta-Loss.
     
     Meta-Loss options:
       - TCP (default): MSE(ĉ(x), TCP) where TCP = p(y*|x) = softmax(logits)[target]
       - Brier Score: MSE(ĉ(x), correctness) where correctness = 1 if pred==target else 0
-      - NLL: Negative Log-Likelihood for probabilistic calibration
+      - NLL: Negative Log-Likelihood described in the paper
     
-    Calibration Enhancement Options:
+    Calibration Enhancement Options: (not used by default)
       - focal: Focal MSE loss (focus on hard samples)
       - margin: Margin-based separation loss
       - ece_reg: Soft ECE regularization
@@ -999,8 +1169,11 @@ def train_epoch_joint(model, meta_cal, trainloader, optimizer, meta_optimizer,
         # Total meta-related loss
         total_meta_loss = meta_loss + calib_loss
         
-        # Total loss
-        total_loss = ce_loss + meta_loss_weight * total_meta_loss
+        # Total loss (supports both scalar weight and callable LearnedMetaWeight)
+        if callable(meta_loss_weight):
+            total_loss = ce_loss + meta_loss_weight(total_meta_loss)
+        else:
+            total_loss = ce_loss + meta_loss_weight * total_meta_loss
         
         # Accuracy
         _, preds = logits.max(dim=1)
@@ -1015,6 +1188,9 @@ def train_epoch_joint(model, meta_cal, trainloader, optimizer, meta_optimizer,
         # Backward
         optimizer.zero_grad()
         meta_optimizer.zero_grad()
+        if extra_optimizers:
+            for opt in extra_optimizers:
+                opt.zero_grad()
         total_loss.backward()
         
         # Track gradient norms if requested (for end-to-end stability monitoring)
@@ -1023,6 +1199,9 @@ def train_epoch_joint(model, meta_cal, trainloader, optimizer, meta_optimizer,
         
         optimizer.step()
         meta_optimizer.step()
+        if extra_optimizers:
+            for opt in extra_optimizers:
+                opt.step()
         
         bar.suffix = '({batch}/{size}) | CE: {ce:.4f} | Meta: {meta:.4f} | Acc: {acc:.2f}'.format(
             batch=batch_idx+1, size=len(trainloader), ce=ce_losses.avg, meta=meta_losses.avg, acc=accuracies.avg)
@@ -1061,7 +1240,32 @@ def main():
     parser.add_argument('--rl-lr', default=3e-4, type=float)
     parser.add_argument('--init-threshold', default=0.5, type=float)
     parser.add_argument('--init-meta-weight', default=1.0, type=float)
-    parser.add_argument('--no-rl', action='store_true', help='Disable RL, use fixed threshold and meta_weight')
+    parser.add_argument('--no-rl', action='store_true', help='Disable RL, use fixed threshold and meta_weight (shortcut for --meta-weight-mode fixed)')
+    parser.add_argument('--meta-weight-mode', default='rl', type=str,
+                        choices=['fixed', 'cosine', 'linear', 'step', 'decay', 'adaptive', 'learned', 'rl'],
+                        help='How to set meta_loss_weight during Phase 2: '
+                             'fixed = constant --init-meta-weight throughout, '
+                             'cosine = smooth 0 → max ramp, '
+                             'linear = linear 0 → max ramp, '
+                             'step = short warmup then constant, '
+                             'decay = cosine decay from init-meta-weight → min-meta-weight, '
+                             'adaptive = validation-AURC-based adjustment, '
+                             'learned = differentiable uncertainty weighting (Kendall et al.), '
+                             'rl = PPO agent (default, may cause variance)')
+    parser.add_argument('--min-meta-weight', default=1e-4, type=float,
+                        help='Floor for meta_weight in decay mode (default: 0.0001)')
+    
+    # Adaptive controller params (only used when --meta-weight-mode adaptive)
+    parser.add_argument('--adapt-patience', default=3, type=int,
+                        help='Adaptive mode: epochs without AURC improvement before decreasing weight')
+    parser.add_argument('--adapt-increase', default=1.05, type=float,
+                        help='Adaptive mode: multiplicative factor when AURC improves')
+    parser.add_argument('--adapt-decrease', default=0.90, type=float,
+                        help='Adaptive mode: multiplicative factor after patience exceeded')
+    parser.add_argument('--adapt-min', default=0.1, type=float,
+                        help='Adaptive mode: minimum meta_loss_weight')
+    parser.add_argument('--adapt-max', default=3.0, type=float,
+                        help='Adaptive mode: maximum meta_loss_weight')
     
     # Meta-Loss Type
     parser.add_argument('--brier', action='store_true', 
@@ -1100,6 +1304,10 @@ def main():
     
     args = parser.parse_args()
     
+    # Backward compatibility: --no-rl maps to --meta-weight-mode fixed
+    if args.no_rl and args.meta_weight_mode == 'rl':
+        args.meta_weight_mode = 'fixed'
+    
     # Set seeds
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -1120,15 +1328,15 @@ def main():
     # Model: VGG16_bn with C outputs (NO reservation!)
     model = VGG16BN_FeatureExtractor(num_classes=num_classes, input_size=input_size).to(device)
     
-    # Meta-Calibrator dimensions depend on input size
-    # For 32x32: pool4=512*4, pool5=512*1
-    # For 64x64: pool4=512*16, pool5=512*4
+    # Adaptive pooling dims: pool to 2×2 if spatial > 2×2, else keep
+    # 32×32: pool4=512×2×2=2048(keep), pool5=512×1×1=512(keep)
+    # 64×64: pool4=512×4×4→2×2=2048,  pool5=512×2×2=2048(keep)
     if input_size == 32:
-        pool4_dim = 512 * 4  # 512×2×2
-        pool5_dim = 512 * 1  # 512×1×1
+        pool4_dim = 512 * 4   # 512×2×2
+        pool5_dim = 512 * 1   # 512×1×1
     else:  # 64x64
-        pool4_dim = 512 * 16  # 512×4×4
-        pool5_dim = 512 * 4   # 512×2×2
+        pool4_dim = 512 * 4   # 512×4×4 → pool(2,2) → 512×2×2
+        pool5_dim = 512 * 4   # 512×2×2 (kept)
     
     # Meta-Calibrator
     meta_cal = MetaCalibrator(
@@ -1153,14 +1361,36 @@ def main():
     milestones = [25, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275]
     scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=0.5)
     
-    # RL Controller
-    # State: [global_aurc, val_acc, mean_confidence, epoch_progress, class_acc_vector (10)]
-    state_dim = 4 + num_classes
-    ppo_agent = PPOAgent(state_dim=state_dim, lr=args.rl_lr, device=device)
-    
-    # Current RL-controlled parameters
+    # Meta-Weight Controller initialization
     current_threshold = args.init_threshold
     current_meta_weight = args.init_meta_weight
+    
+    # adaptive_controller = None
+    # ppo_agent = None
+    # learned_weight_module = None
+    # learned_weight_optimizer = None
+    
+    # if args.meta_weight_mode == 'adaptive':
+    #     adaptive_controller = AdaptiveMetaWeight(
+    #         init_weight=args.init_meta_weight,
+    #         min_weight=args.adapt_min,
+    #         max_weight=args.adapt_max,
+    #         increase_factor=args.adapt_increase,
+    #         decrease_factor=args.adapt_decrease,
+    #         patience=args.adapt_patience
+    #     )
+    # elif args.meta_weight_mode == 'learned':
+    #     learned_weight_module = LearnedMetaWeight(init_weight=args.init_meta_weight).to(device)
+    #     # Plain Adam — the softplus barrier in the loss handles regularization,
+    #     # no external weight decay needed.
+    #     learned_weight_optimizer = optim.Adam(
+    #         learned_weight_module.parameters(), lr=args.meta_lr
+    #     )
+    # elif args.meta_weight_mode == 'rl':
+    #     # RL Controller (PPO)
+    #     # State: [global_aurc, val_acc, mean_confidence, epoch_progress, class_acc_vector]
+    #     state_dim = 4 + num_classes
+    #     ppo_agent = PPOAgent(state_dim=state_dim, lr=args.rl_lr, device=device)
     
     # Logging - include flags in directory name
     suffix = ''
@@ -1186,8 +1416,8 @@ def main():
         suffix += '_freqweight'
     elif args.error_weight != 1.0:
         suffix += f'_ew{args.error_weight}'
-    if args.no_rl:
-        suffix += '_norl'
+    if args.meta_weight_mode != 'rl':
+        suffix += f'_{args.meta_weight_mode}'
     if args.seed != 42:
         suffix += f'_seed{args.seed}'
     save_dir = f'./save/{args.dataset}/vgg16_bn_scsf{suffix}_4_layers'
@@ -1206,7 +1436,7 @@ def main():
             'Test_Err', 'AURC', 'Mean_Conf', 'Threshold', 'Meta_Weight'
         ])
     
-    # Previous state for RL
+    # Previous state for RL / adaptive modes
     prev_state = None
     prev_action = None
     prev_aurc = None
@@ -1265,18 +1495,22 @@ def main():
         print(f'MSE Weighting Strategy: None (uniform weighting)')
     
     print(f'Phase 1 (Epoch 1-{args.pretrain}): Cross-Entropy Warmup')
-    if args.no_rl:
-        print(f'Phase 2 (Epoch {args.pretrain+1}-{args.epochs}): Joint Training (CE + Meta-Loss) [RL DISABLED]')
-        print(f'Fixed Meta-Loss Weight (λ): {current_meta_weight:.2f}')
-    else:
-        print(f'Phase 2 (Epoch {args.pretrain+1}-{args.epochs}): Joint Training (CE + Meta-Loss) + RL')
-        print(f'RL Update Frequency: Every {args.rl_freq} epochs')
-        print(f'Initial Threshold: {current_threshold:.2f}')
-        print(f'Initial Meta-Loss Weight: {current_meta_weight:.2f}')
+    mode_desc = {
+        'fixed': f'Fixed λ={current_meta_weight:.2f}',
+        'cosine': f'Cosine schedule 0 → {args.init_meta_weight:.2f}',
+        'linear': f'Linear schedule 0 → {args.init_meta_weight:.2f}',
+        'step': f'Step warmup then constant {args.init_meta_weight:.2f}',
+        'decay': f'Cosine decay {args.init_meta_weight:.2f} → {args.min_meta_weight:.4f}',
+        'adaptive': f'Adaptive (init={args.init_meta_weight:.2f}, range=[{args.adapt_min},{args.adapt_max}], patience={args.adapt_patience})',
+        'learned': f'Learned uncertainty weighting (init={args.init_meta_weight:.2f}, jointly optimized)',
+        'rl': f'RL/PPO (init={args.init_meta_weight:.2f}, freq={args.rl_freq})',
+    }
+    print(f'Phase 2 (Epoch {args.pretrain+1}-{args.epochs}): Joint Training (CE + Meta-Loss)')
+    print(f'Meta-Weight Mode: {args.meta_weight_mode} — {mode_desc[args.meta_weight_mode]}')
     print(f'Save Directory: {save_dir}')
     print(f'{"="*80}\n')
     
-    best_aurc = float('inf')
+    mean_aurc = float('inf')
     
     for epoch in range(1, args.epochs + 1):
         current_lr = optimizer.param_groups[0]['lr']
@@ -1295,6 +1529,25 @@ def main():
         # Phase 2: Joint Training (Epoch 101-300)
         # ======================================================================
         else:
+            # Update meta_loss_weight based on schedule mode
+            if args.meta_weight_mode == 'cosine':
+                current_meta_weight = get_meta_weight_cosine(
+                    epoch, args.pretrain, args.epochs, args.init_meta_weight)
+            elif args.meta_weight_mode == 'linear':
+                current_meta_weight = get_meta_weight_linear(
+                    epoch, args.pretrain, args.epochs, args.init_meta_weight)
+            elif args.meta_weight_mode == 'step':
+                current_meta_weight = get_meta_weight_step(
+                    epoch, args.pretrain, args.epochs, args.init_meta_weight)
+            elif args.meta_weight_mode == 'decay':
+                current_meta_weight = get_meta_weight_decay(
+                    epoch, args.pretrain, args.epochs, args.init_meta_weight, args.min_meta_weight)
+            # 'fixed', 'adaptive', 'rl' are updated elsewhere or stay constant
+            # 'learned' uses the module directly (passed as callable)
+            
+            # For learned mode, pass the module itself; for others, pass scalar
+            effective_weight = learned_weight_module if args.meta_weight_mode == 'learned' else current_meta_weight
+            
             # Calibration arguments
             calib_args = {
                 'focal': args.focal,
@@ -1307,20 +1560,28 @@ def main():
                 'error_weight_type': args.error_weight_type,
             }
             
+            # Build list of extra optimizers (for learned weight mode)
+            extra_opts = [learned_weight_optimizer] if learned_weight_optimizer is not None else None
+            
             # Track gradients for end-to-end mode
             if args.end_to_end:
                 result = train_epoch_joint(
                     model, meta_cal, trainloader, optimizer, meta_optimizer,
-                    current_meta_weight, device, use_brier=args.brier, calib_args=calib_args,
-                    track_grads=True
+                    effective_weight, device, use_brier=args.brier, calib_args=calib_args,
+                    track_grads=True, extra_optimizers=extra_opts
                 )
                 train_loss, ce_loss, meta_loss, train_acc, mean_conf, grad_stats = result
             else:
                 train_loss, ce_loss, meta_loss, train_acc, mean_conf = train_epoch_joint(
                     model, meta_cal, trainloader, optimizer, meta_optimizer,
-                    current_meta_weight, device, use_brier=args.brier, calib_args=calib_args
+                    effective_weight, device, use_brier=args.brier, calib_args=calib_args,
+                    extra_optimizers=extra_opts
                 )
                 grad_stats = None
+            
+            # # Update current_meta_weight for logging (learned mode)
+            # if args.meta_weight_mode == 'learned':
+            #     current_meta_weight = learned_weight_module.effective_weight
         
         # Step scheduler
         scheduler.step()
@@ -1332,67 +1593,78 @@ def main():
         test_err = 100 - test_acc
         
         # Track best
-        if global_aurc < best_aurc:
-            best_aurc = global_aurc
+        # if global_aurc < mean_aurc:
+        #     mean_aurc = global_aurc
         
-        # ======================================================================
-        # RL Controller Update (after pretraining, every rl_freq epochs)
-        # ======================================================================
+        # # ======================================================================
+        # # Meta-Weight Update (adaptive or RL modes)
+        # # ======================================================================
         
-        if not args.no_rl and epoch > args.pretrain and epoch % args.rl_freq == 0:
+        # if args.meta_weight_mode == 'adaptive' and epoch > args.pretrain and epoch % args.rl_freq == 0:
+        #     # Adaptive: update meta_weight based on validation AURC
+        #     val_coverage, val_acc, val_aurc, val_conf, val_tcp = \
+        #         evaluate_selective_risk(model, meta_cal, valloader, COVERAGE_POINTS, device)
             
-            # Evaluate on validation set
-            val_coverage, val_acc, val_aurc, val_conf, val_tcp = \
-                evaluate_selective_risk(model, meta_cal, valloader, COVERAGE_POINTS, device)
+        #     old_weight = current_meta_weight
+        #     current_meta_weight = adaptive_controller.step(val_aurc)
             
-            # Compute per-class accuracy
-            class_acc = compute_class_accuracy(model, valloader, num_classes, device)
+        #     direction = '↑' if current_meta_weight > old_weight else ('↓' if current_meta_weight < old_weight else '=')
+        #     print(f'  Adaptive: meta_w={current_meta_weight:.4f} ({direction}) | '
+        #           f'val_AURC={val_aurc:.4f} | mean_AURC={adaptive_controller.mean_aurc:.4f}')
+        
+        # elif args.meta_weight_mode == 'rl' and epoch > args.pretrain and epoch % args.rl_freq == 0:
+        #     # RL: PPO-based update
+        #     val_coverage, val_acc, val_aurc, val_conf, val_tcp = \
+        #         evaluate_selective_risk(model, meta_cal, valloader, COVERAGE_POINTS, device)
             
-            # Build state vector
-            epoch_progress = (epoch - args.pretrain) / (args.epochs - args.pretrain)
-            current_state = np.concatenate([
-                [val_aurc * 10, val_acc / 100, val_conf, epoch_progress],
-                class_acc / 100
-            ])
+        #     # Compute per-class accuracy
+        #     class_acc = compute_class_accuracy(model, valloader, num_classes, device)
             
-            # Compute reward (AURC improvement)
-            rl_reward = 0.0
-            if prev_aurc is not None:
-                rl_reward = 100 * (prev_aurc - val_aurc)  # Reward for decreasing AURC
+        #     # Build state vector
+        #     epoch_progress = (epoch - args.pretrain) / (args.epochs - args.pretrain)
+        #     current_state = np.concatenate([
+        #         [val_aurc * 10, val_acc / 100, val_conf, epoch_progress],
+        #         class_acc / 100
+        #     ])
             
-            # Store transition
-            if prev_state is not None and prev_action is not None:
-                with torch.no_grad():
-                    state_tensor = torch.FloatTensor(prev_state).unsqueeze(0).to(device)
-                    _, _, value = ppo_agent.actor_critic(state_tensor)
-                    value = value.item()
+        #     # Compute reward (AURC improvement)
+        #     rl_reward = 0.0
+        #     if prev_aurc is not None:
+        #         rl_reward = 100 * (prev_aurc - val_aurc)
+            
+        #     # Store transition
+        #     if prev_state is not None and prev_action is not None:
+        #         with torch.no_grad():
+        #             state_tensor = torch.FloatTensor(prev_state).unsqueeze(0).to(device)
+        #             _, _, value = ppo_agent.actor_critic(state_tensor)
+        #             value = value.item()
                 
-                ppo_agent.store_transition(prev_state, prev_action, rl_reward, value, 0.0)
+        #         ppo_agent.store_transition(prev_state, prev_action, rl_reward, value, 0.0)
             
-            # Select action: [threshold, meta_loss_weight]
-            action, log_prob = ppo_agent.select_action(current_state)
+        #     # Select action: [threshold, meta_loss_weight]
+        #     action, log_prob = ppo_agent.select_action(current_state)
             
-            # Apply action
-            current_threshold = float(action[0])
-            current_meta_weight = float(action[1]) * 2.0  # Scale to [0, 2]
+        #     # Apply action
+        #     current_threshold = float(action[0])
+        #     current_meta_weight = float(action[1]) * 2.0  # Scale to [0, 2]
             
-            # Update PPO
-            if len(ppo_agent.states) >= 4:
-                ppo_stats = ppo_agent.update()
-                print(f'  PPO Update: Policy Loss={ppo_stats["policy_loss"]:.4f}')
+        #     # Update PPO
+        #     if len(ppo_agent.states) >= 4:
+        #         ppo_stats = ppo_agent.update()
+        #         print(f'  PPO Update: Policy Loss={ppo_stats["policy_loss"]:.4f}')
             
-            # Store for next step
-            prev_state = current_state
-            prev_action = action
-            prev_aurc = val_aurc
+        #     # Store for next step
+        #     prev_state = current_state
+        #     prev_action = action
+        #     prev_aurc = val_aurc
             
-            print(f'  RL: τ={current_threshold:.3f}, meta_w={current_meta_weight:.3f}, reward={rl_reward:+.4f}')
+        #     print(f'  RL: τ={current_threshold:.3f}, meta_w={current_meta_weight:.3f}, reward={rl_reward:+.4f}')
         
-        # Initialize prev_aurc at end of pretraining
-        if not args.no_rl and epoch == args.pretrain:
-            _, _, prev_aurc, _, _ = evaluate_selective_risk(
-                model, meta_cal, valloader, COVERAGE_POINTS, device
-            )
+        # # Initialize prev_aurc at end of pretraining (for RL mode)
+        # if args.meta_weight_mode == 'rl' and epoch == args.pretrain:
+        #     _, _, prev_aurc, _, _ = evaluate_selective_risk(
+        #         model, meta_cal, valloader, COVERAGE_POINTS, device
+        #     )
         
         # Log
         phase = '[Warmup]' if epoch <= args.pretrain else '[Joint]'
@@ -1474,7 +1746,10 @@ def main():
         'meta_cal_state_dict': meta_cal.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'meta_optimizer_state_dict': meta_optimizer.state_dict(),
-        'ppo_state_dict': ppo_agent.actor_critic.state_dict(),
+        'ppo_state_dict': ppo_agent.actor_critic.state_dict() if ppo_agent is not None else None,
+        'learned_weight_state_dict': learned_weight_module.state_dict() if learned_weight_module is not None else None,
+        'learned_weight_optimizer_state_dict': learned_weight_optimizer.state_dict() if learned_weight_optimizer is not None else None,
+        'meta_weight_mode': args.meta_weight_mode,
         'threshold': current_threshold,
         'meta_loss_weight': current_meta_weight,
         'final_aurc': final_aurc,
@@ -1527,3 +1802,4 @@ def compute_class_accuracy(model, loader, num_classes, device):
 
 if __name__ == '__main__':
     main()
+    #used paper run: python train_scsf.py --dataset cifar10 --meta-weight-mode decay --init-meta-weight 1.0 --min-meta-weight 0.001 --error-weight-type fixed --error-weight 1.0 j j day e quen r
