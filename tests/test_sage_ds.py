@@ -250,3 +250,22 @@ def test_sage_ds_train_step_routes_gradients_and_leaves_gates_manual():
     assert any(n.startswith("backbone.") for n in moved)
     assert any("aux_heads" in n for n in moved)
     assert all(n.startswith("backbone.") or "aux_heads" in n for n in moved)
+
+
+def test_sage_ds_utility_interval_passes_training_device(monkeypatch):
+    """Exercise the utility branch that the ordinary one-step smoke skips."""
+    cfg = _sg_cfg()
+    cfg["method"]["utility_interval"] = 1
+    m = build_method("sage_ds", cfg)
+    m.train()
+    seen = []
+    monkeypatch.setattr(m, "_estimate_utilities", lambda device: seen.append(device))
+
+    x = torch.randn(2, 3, 32, 32)
+    y = torch.randint(0, 10, (2,))
+    loss_dict = m.train_loss(
+        (x, y, torch.arange(2)), SimpleNamespace(batch_index=1))
+
+    assert seen == [next(m.backbone.parameters()).device]
+    assert all(torch.isfinite(value).all() for value in loss_dict.values()
+               if torch.is_tensor(value))

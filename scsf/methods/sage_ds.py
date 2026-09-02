@@ -504,7 +504,7 @@ class SageDSMethod(Method):
 
         step = int(getattr(state, "batch_index", 0))
         if self._should_estimate_utility(step):
-            self._estimate_utilities(device)
+            self._estimate_utilities(ce_t.device)
         return out
 
     # ------------------------------------------------------------- utility
