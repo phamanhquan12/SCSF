@@ -106,12 +106,31 @@ def scheduler(manifest: str, results_root: str, python: str, dry_run: bool = Fal
             train_cmd = [python, "-m", "scsf.train"] + args.split()
             if resume_from:
                 train_cmd += ["+resume_from=" + resume_from]
-            dt_tr = _run(train_cmd, logfile)
-            ev_cmd = [python, "-m", "scsf.evaluate",
-                      f"run_dir={run_dir}", "split=val"]
-            dt_ev = _run(ev_cmd, logfile)
-            ev_cmd[-1] = "split=test"
-            dt_test = _run(ev_cmd, logfile)
+            try:
+                dt_tr = _run(train_cmd, logfile)
+                ev_cmd = [python, "-m", "scsf.evaluate",
+                          f"run_dir={run_dir}", "split=val"]
+                dt_ev = _run(ev_cmd, logfile)
+                ev_cmd[-1] = "split=test"
+                dt_test = _run(ev_cmd, logfile)
+            except RuntimeError as exc:
+                dt_tr = dt_ev = dt_test = 0.0
+                print(f"    FAILED: {exc}", flush=True)
+                with open(logfile, "a") as f:
+                    f.write(f"\nSCHEDULER_CAUGHT: {exc}\n")
+                # Write a progress row marking the failure so the manifest
+                # is still iterated; on relaunch the run will be retried
+                # (not complete → scheduler loops back).
+                with open(progress_path, "a", newline="") as f:
+                    w = csv.writer(f, delimiter="\t", lineterminator="\n")
+                    w.writerow([row["priority"], row["stage"], row["dataset"],
+                                row["backbone"], row["method_name"], row["mode"],
+                                row["seed"], run_dir, resumed or "-", "0",
+                                "0", "0", "0", "0",
+                                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                "FAILED"])
+                done += 1
+                continue
         else:
             dt_tr = dt_ev = dt_test = 0.0
             print("    (dry-run) train+val+test", flush=True)
@@ -126,13 +145,14 @@ def scheduler(manifest: str, results_root: str, python: str, dry_run: bool = Fal
                 w.writerow(["priority", "stage", "dataset", "backbone",
                             "method_name", "mode", "seed", "run_dir",
                             "resume_from", "train_s", "eval_s", "test_s",
-                            "total_s", "rc_train_ok", "time"])
+                            "total_s", "rc_train_ok", "time", "status"])
             w.writerow([row["priority"], row["stage"], row["dataset"],
                         row["backbone"], row["method_name"], row["mode"],
                         row["seed"], run_dir, resumed, f"{dt_tr:.1f}",
                         f"{dt_ev:.1f}", f"{dt_test:.1f}", f"{dt:.1f}",
                         "1" if dt_tr else "0",
-                        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())])
+                        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "OK"])
         done += 1
         print(f"    done in {dt/60:.1f} min", flush=True)
     print(f"\nscheduler finished: {done}/{len(rows)} rows processed", flush=True)
