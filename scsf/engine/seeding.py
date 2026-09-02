@@ -47,7 +47,10 @@ def restore_global_state(state: dict, generator=None) -> None:
         for i, st in state["torch_cuda"].items():
             torch.cuda.set_rng_state(st.cpu(), i)
     if generator is not None and "generator" in state:
-        generator.set_state(state["generator"][0])
+        # ``generator`` is always a CPU generat; a checkpoint loaded with
+        # map_location=cuda carries its state as a CUDA byte-tensor, so pull
+        # it back to CPU before set_state (GPU resume regression fix).
+        generator.set_state(state["generator"][0].cpu())
 
 
 def make_generator(seed: int) -> torch.Generator:

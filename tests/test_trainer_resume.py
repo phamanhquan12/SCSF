@@ -118,3 +118,32 @@ def test_selection_tracker_state_roundtrip():
     st2.restore(state)
     assert st2.summary() == st.summary()
     assert st2.state() == st.state()
+
+
+def test_gpu_map_location_resume_rng_state_is_copied_to_cpu():
+    """GPU resume regression: a checkpoint loaded with map_location=cuda holds
+    the generator state as a CUDA tensor; restore_global_state must move it to
+    a CPU tensor before set_state on the CPU generator. Skips on CPU-only hosts.
+    """
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("cuda not available")
+    from scsf.engine.seeding import capture_global_state, make_generator, restore_global_state
+
+    g = make_generator(13)
+    torch.randn(1, generator=g)  # advance it past its initial state
+    state = capture_global_state(generator=g)
+    # emulate torch.load(map_location='cuda'): all saved state tensors move to cuda
+    from scsf.engine.checkpoint import CheckpointManager
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        m = CheckpointManager(td)
+        m.save("t", {"rng": state})
+        payload = m.load("t", map_location="cuda")
+    st = payload["rng"]
+    assert st["generator"][0].is_cuda, "test fixture: generator state must be on cuda"
+    g2 = make_generator(13)
+    restore_global_state(st, g2)  # must not raise and must stay CPU-stateful
+    assert g2.get_state().clone().equal(state["generator"][0].cpu())
