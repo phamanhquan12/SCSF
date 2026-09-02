@@ -112,7 +112,12 @@ def overrides_from_cli(argv=None):
         if "=" not in arg:
             raise ValueError(f"expected 'key=value', got {arg!r}")
         k, v = arg.split("=", 1)
-        _set_dotted(out, k.strip(), v)
+        # Hydra-style "\u002b" flags (e.g. "+resume_from=epoch_003") collapse to
+        # the plain override key; the trainer pops "resume_from" from this dict.
+        # Without this strip a documented resume flag would be silently ignored
+        # and a killed job would restart instead of resume.
+        k = k.strip().lstrip("+")
+        _set_dotted(out, k, v)
     return out
 
 

@@ -23,6 +23,16 @@ def test_bad_override_rejected():
         config.overrides_from_cli(["dataset"])
 
 
+def test_resume_flags_collapse_to_plain_keys():
+    # ``+resume_from=epoch_003`` (documented CLI) must land on the plain
+    # "resume_from" key exactly as trainer.main pops it; a missing '\u002B'
+    # strip restarts a killed job instead of resuming (regression test).
+    ov = config.overrides_from_cli(["+resume_from=epoch_003"])
+    assert ov["resume_from"] == "epoch_003"
+    assert "+resume_from" not in ov
+    assert config.overrides_from_cli(["resume_from=last"])["resume_from"] == "last"
+
+
 def test_resolve_defaults_and_env_root(monkeypatch):
     monkeypatch.setenv("SCSF_DATA_ROOT", "/tmp/scsf_data_root_check")
     cfg = config.resolve({"dataset": "cifar10", "results_root": "/tmp/opencode/cfg_tests"})
