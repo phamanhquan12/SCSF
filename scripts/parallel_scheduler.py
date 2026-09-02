@@ -1,9 +1,10 @@
 """Parallel GPU scheduler for the CIFAR gate matrix.
 
-Runs up to ``--max-jobs`` training+eval jobs concurrently on a single GPU.
-PyTorch handles CUDA memory sharing; the scheduler monitors nvidia-smi and
-throttles when memory exceeds ``--max-gpu-miB``.  Completed runs
-(complete=1 in registry.csv) are never restarted.
+Runs up to ``--max-jobs`` training+eval jobs concurrently on one GPU. Each job
+is a plain background subprocess wrapping a small driver (this module's
+``_job_main``) that runs train + val-eval + test-eval and prints one JSON line
+on exit. Completed runs (complete=1 in registry.csv) are never restarted. A
+singleton lock prevents duplicate scheduler instances.
 
 Usage::
 
@@ -11,7 +12,7 @@ Usage::
         --manifest results/manifests/gate.tsv \\
         --results-root results \\
         --python /root/scsf_venv/bin/python \\
-        --max-jobs 3
+        --max-jobs 4
 """
 
 from __future__ import annotations
@@ -19,12 +20,11 @@ from __future__ import annotations
 import argparse
 import csv
 import glob
+import json
 import os
-import re
 import subprocess
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -54,7 +54,6 @@ def _registry_test_complete(registry_path: str, run_dir: str) -> bool:
 
 
 def _gpu_used_mib() -> int:
-    """Return current GPU memory used in MiB, or 0 if nvidia-smi unavailable."""
     try:
         out = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
@@ -65,95 +64,76 @@ def _gpu_used_mib() -> int:
         return 0
 
 
-def _run_one(row: dict, results_root: str, python: str, progress_path: str,
-             registry_path: str, log_root: str, max_gpu_mib: int) -> dict:
-    """Run one manifest row (train + val + test).  Returns a summary dict."""
+def _job_main() -> int:
+    """Entry point for one job subprocess (reads args from stdin as JSON)."""
+    spec = json.load(sys.stdin)
+    row = spec["row"]
+    results_root = spec["results_root"]
+    python = spec["python"]
+    logfile = spec["logfile"]
     run_dir = row["run_dir"]
-    short = run_dir.replace(results_root + "/", "")
-    logfile = os.path.join(log_root, short.replace("/", "__") + ".log")
+
     result = {"run_dir": run_dir, "status": "OK", "train_s": 0.0,
-              "eval_s": 0.0, "test_s": 0.0, "total_s": 0.0, "resumed": "-"}
-
-    # Skip if already complete
-    if _registry_test_complete(registry_path, run_dir):
-        result["status"] = "SKIP"
-        return result
-
-    resume_from = None
-    if not _training_finished(run_dir):
-        ckpt = _highest_epoch_ckpt(run_dir)
-        if ckpt:
-            resume_from = ckpt
-        elif os.path.exists(os.path.join(run_dir, "last.pt")):
-            resume_from = "last"
-    result["resumed"] = resume_from or "-"
-
+              "eval_s": 0.0, "test_s": 0.0, "total_s": 0.0}
+    resumed = "-"
+    exit_code = 0
     t0 = time.time()
+    log = open(logfile, "ab")
     try:
-        # Wait for GPU memory
-        while True:
-            used = _gpu_used_mib()
-            if used < max_gpu_mib:
-                break
-            time.sleep(30)
+        resume_from = None
+        if not _training_finished(run_dir):
+            ckpt = _highest_epoch_ckpt(run_dir)
+            if ckpt:
+                resume_from = ckpt
+            elif os.path.exists(os.path.join(run_dir, "last.pt")):
+                resume_from = "last"
+        resumed = resume_from or "-"
 
-        # Train
         train_cmd = [python, "-m", "scsf.train"] + row["args"].split()
         if resume_from:
             train_cmd += ["+resume_from=" + resume_from]
-        with open(logfile, "ab") as f:
-            p = subprocess.run(train_cmd, check=False, stdout=f,
-                               stderr=subprocess.STDOUT)
+        p = subprocess.run(train_cmd, check=False, stdout=log, stderr=subprocess.STDOUT)
         if p.returncode != 0:
-            raise RuntimeError(f"train rc={p.returncode}")
+            result["status"] = "TRAIN_FAIL"
+            result["total_s"] = time.time() - t0
+            exit_code = 1
+            sys.stdout.write(json.dumps({"result": result, "ok": False,
+                                         "resumed": resumed}))
+            return exit_code
         result["train_s"] = time.time() - t0
 
-        # Evaluate val
-        t_ev = time.time()
-        ev_cmd = [python, "-m", "scsf.evaluate",
-                  f"run_dir={run_dir}", "split=val"]
-        with open(logfile, "ab") as f:
-            p = subprocess.run(ev_cmd, check=False, stdout=f,
-                               stderr=subprocess.STDOUT)
-        if p.returncode != 0:
-            raise RuntimeError(f"eval-val rc={p.returncode}")
-        result["eval_s"] = time.time() - t_ev
+        for split in ("val", "test"):
+            t_ev = time.time()
+            ev_cmd = [python, "-m", "scsf.evaluate",
+                      f"run_dir={run_dir}", f"split={split}"]
+            p = subprocess.run(ev_cmd, check=False, stdout=log, stderr=subprocess.STDOUT)
+            if p.returncode != 0:
+                result["status"] = f"EVAL_FAIL_{split}"
+                result["total_s"] = time.time() - t0
+                exit_code = 1
+                sys.stdout.write(json.dumps({"result": result, "ok": False,
+                                             "resumed": resumed}))
+                return exit_code
+            if split == "val":
+                result["eval_s"] = time.time() - t_ev
+            else:
+                result["test_s"] = time.time() - t_ev
 
-        # Evaluate test
-        t_te = time.time()
-        ev_cmd[-1] = "split=test"
-        with open(logfile, "ab") as f:
-            p = subprocess.run(ev_cmd, check=False, stdout=f,
-                               stderr=subprocess.STDOUT)
-        if p.returncode != 0:
-            raise RuntimeError(f"eval-test rc={p.returncode}")
-        result["test_s"] = time.time() - t_te
-
-    except RuntimeError as exc:
-        result["status"] = "FAILED"
-        result["error"] = str(exc)
-        with open(logfile, "a") as f:
-            f.write(f"\nSCHEDULER_CAUGHT: {exc}\n")
-
-    result["total_s"] = time.time() - t0
-
-    # Append progress row
-    with open(progress_path, "a", newline="") as f:
-        w = csv.writer(f, delimiter="\t", lineterminator="\n")
-        w.writerow([row.get("priority", ""), row.get("stage", ""),
-                    row.get("dataset", ""), row.get("backbone", ""),
-                    row.get("method_name", ""), row.get("mode", ""),
-                    row.get("seed", ""), run_dir, result["resumed"],
-                    f"{result['train_s']:.1f}", f"{result['eval_s']:.1f}",
-                    f"{result['test_s']:.1f}", f"{result['total_s']:.1f}",
-                    "1" if result["train_s"] else "0",
-                    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    result["status"]])
-    return result
+        result["total_s"] = time.time() - t0
+        sys.stdout.write(json.dumps({"result": result, "ok": True, "resumed": resumed}))
+        return exit_code
+    except Exception as exc:
+        result["status"] = "CRASHED"
+        result["total_s"] = time.time() - t0
+        result["error"] = repr(exc)
+        sys.stdout.write(json.dumps({"result": result, "ok": False, "resumed": resumed}))
+        return 1
+    finally:
+        log.close()
 
 
 def parallel_scheduler(manifest: str, results_root: str, python: str,
-                       max_jobs: int = 3, max_gpu_mib: int = 20000,
+                       max_jobs: int = 4, max_gpu_mib: int = 22000,
                        dry_run: bool = False) -> list:
     registry_path = os.path.join(results_root, "registry.csv")
     progress_path = os.path.join(results_root, "progress.tsv")
@@ -161,34 +141,21 @@ def parallel_scheduler(manifest: str, results_root: str, python: str,
     log_root = os.path.join(results_root, "logs")
     os.makedirs(log_root, exist_ok=True)
 
-    # Singleton lock to prevent duplicate instances
     lock_path = os.path.join(results_root, ".scheduler.lock")
     if os.path.exists(lock_path):
         try:
             old_pid = int(open(lock_path).read().strip())
-            os.kill(old_pid, 0)  # check if alive
+            os.kill(old_pid, 0)
             print(f"ERROR: another scheduler (pid {old_pid}) is running. "
                   f"Remove {lock_path} if stale.", flush=True)
             sys.exit(1)
         except (OSError, ValueError):
-            pass  # stale lock
+            pass
     with open(lock_path, "w") as f:
         f.write(str(os.getpid()))
 
-    try:
-        return _scheduler_inner(manifest, results_root, python, registry_path,
-                                progress_path, log_root, max_jobs, max_gpu_mib,
-                                dry_run)
-    finally:
-        try:
-            os.unlink(lock_path)
-        except OSError:
-            pass
+    rows = list(csv.DictReader(open(manifest, newline=""), delimiter="\t"))
 
-
-def _scheduler_inner(manifest, results_root, python, registry_path,
-                     progress_path, log_root, max_jobs, max_gpu_mib, dry_run):
-    # Initialize progress header if needed
     if not os.path.exists(progress_path) or os.path.getsize(progress_path) == 0:
         with open(progress_path, "w", newline="") as f:
             w = csv.writer(f, delimiter="\t", lineterminator="\n")
@@ -197,9 +164,6 @@ def _scheduler_inner(manifest, results_root, python, registry_path,
                         "resume_from", "train_s", "eval_s", "test_s",
                         "total_s", "rc_train_ok", "time", "status"])
 
-    rows = list(csv.DictReader(open(manifest, newline=""), delimiter="\t"))
-
-    # Filter out already-complete runs
     pending = [r for r in rows if not _registry_test_complete(registry_path, r["run_dir"])]
     skipped = len(rows) - len(pending)
     print(f"manifest: {len(rows)} rows, {skipped} already complete, "
@@ -208,46 +172,108 @@ def _scheduler_inner(manifest, results_root, python, registry_path,
     if dry_run:
         for r in pending:
             print(f"  (dry-run) {r['run_dir']}", flush=True)
+        os.unlink(lock_path)
         return rows
 
+    this_file = os.path.abspath(__file__)
+    repo_root = os.path.dirname(os.path.dirname(this_file))
+
+    queue_idx = 0
+    active = {}
     done = 0
+    failed = 0
     t_start = time.time()
 
-    with ProcessPoolExecutor(max_workers=max_jobs) as pool:
-        futures = {}
-        for row in pending:
-            fut = pool.submit(_run_one, row, results_root, python,
-                              progress_path, registry_path, log_root, max_gpu_mib)
-            futures[fut] = row
+    def _launch(row):
+        run_dir = row["run_dir"]
+        short = run_dir.replace(results_root + "/", "")
+        logfile = os.path.join(log_root, short.replace("/", "__") + ".log")
+        spec = {"row": row, "results_root": results_root, "python": python,
+                "logfile": logfile}
+        p = subprocess.Popen(
+            [python, this_file, "--job-main"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True,
+            cwd=repo_root,
+        )
+        p.stdin.write(json.dumps(spec))
+        p.stdin.close()
+        active[run_dir] = (p, row, logfile)
 
-        for fut in as_completed(futures):
-            row = futures[fut]
-            try:
-                res = fut.result()
-            except Exception as exc:
-                res = {"status": "CRASHED", "error": str(exc)}
-            done += 1
-            short = row["run_dir"].replace(results_root + "/", "")
-            status = res.get("status", "?")
-            elapsed = res.get("total_s", 0)
-            print(f"  [{done}/{len(pending)}] {short} → {status} "
-                  f"({elapsed/60:.1f} min)", flush=True)
+    try:
+        while queue_idx < len(pending) or active:
+            while len(active) < max_jobs and queue_idx < len(pending):
+                row = pending[queue_idx]
+                if _registry_test_complete(registry_path, row["run_dir"]):
+                    queue_idx += 1
+                    continue
+                # GPU memory ceiling
+                if _gpu_used_mib() >= max_gpu_mib and len(active) >= 1:
+                    break
+                _launch(row)
+                queue_idx += 1
+
+            finished = []
+            for run_dir, (p, row, logfile) in list(active.items()):
+                rc = p.poll()
+                if rc is not None:
+                    stdout = p.stdout.read() if p.stdout else ""
+                    finished.append((run_dir, row, rc, stdout))
+                    del active[run_dir]
+            for run_dir, row, rc, stdout in finished:
+                result = {"run_dir": run_dir, "status": "CRASHED", "train_s": 0.0,
+                          "eval_s": 0.0, "test_s": 0.0, "total_s": 0.0}
+                resumed = "-"
+                try:
+                    parsed = json.loads(stdout.strip().splitlines()[-1] if stdout.strip() else "{}")
+                    if parsed:
+                        result = parsed.get("result", result) or result
+                        resumed = parsed.get("resumed", "-")
+                except Exception as dexc:
+                    print(f"  parse-fail {run_dir}: {dexc} stdout={stdout[-200:]}", flush=True)
+                if result.get("status") == "OK":
+                    done += 1
+                else:
+                    failed += 1
+                short = run_dir.replace(results_root + "/", "")
+                print(f"  [{done+failed}] {short} → {result.get('status')} "
+                      f"({result.get('total_s', 0)/60:.1f} min)", flush=True)
+                with open(progress_path, "a", newline="") as f:
+                    w = csv.writer(f, delimiter="\t", lineterminator="\n")
+                    w.writerow([row.get("priority", ""), row.get("stage", ""),
+                                row.get("dataset", ""), row.get("backbone", ""),
+                                row.get("method_name", ""), row.get("mode", ""),
+                                row.get("seed", ""), run_dir, resumed,
+                                f"{result['train_s']:.1f}", f"{result['eval_s']:.1f}",
+                                f"{result['test_s']:.1f}", f"{result['total_s']:.1f}",
+                                "1" if result["train_s"] else "0",
+                                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                result.get("status", "?")])
+            time.sleep(8 if active else 2)
+    finally:
+        try:
+            os.unlink(lock_path)
+        except OSError:
+            pass
 
     wall = time.time() - t_start
-    print(f"\nfinished: {done} runs in {wall/60:.1f} min "
+    print(f"\nfinished: {done} OK, {failed} failed in {wall/60:.1f} min "
           f"({skipped} skipped)", flush=True)
     return rows
 
 
 def main(argv=None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if "--job-main" in argv:
+        sys.exit(_job_main())
     ap = argparse.ArgumentParser()
     ap.add_argument("--manifest", required=True)
     ap.add_argument("--results-root", default="results")
     ap.add_argument("--python", default=sys.executable)
-    ap.add_argument("--max-jobs", type=int, default=3)
-    ap.add_argument("--max-gpu-mib", type=int, default=20000)
+    ap.add_argument("--max-jobs", type=int, default=4)
+    ap.add_argument("--max-gpu-mib", type=int, default=22000)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--job-main", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
     parallel_scheduler(a.manifest, a.results_root, a.python,
                        max_jobs=a.max_jobs, max_gpu_mib=a.max_gpu_mib,
