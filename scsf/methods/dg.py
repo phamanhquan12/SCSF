@@ -13,6 +13,19 @@ plain classifier over the first C classes (argmax confidence ∈ [0, C)), while
 ``R = logsumexp(main logits)`` is the paper's reject statistic used to rank
 abstention (higher = keep). We report the standard CE scores over the main
 classes as auxiliary scores too.
+
+Pretraining phase
+-----------------
+The paper reports that with a low reward the gambler objective can converge
+to the trivial always-abstain point, especially on harder datasets such as
+CIFAR-10, and its reference code therefore *pretrains the backbone with plain
+cross-entropy for a number of epochs* before switching to the gambler loss
+(``--pretrain``; defaults to 100 epochs on CIFAR-10 when ``reward < 6.1``).
+This is a method-defining requirement from the original paper, so we expose it
+as ``method.pretrain`` (in full epochs) and honour the paper's low-reward
+default when the field is unset. During the pretrain epochs, only the first C
+main-class logits are supervised; the reservation neuron is trained solely by
+the gambler phase. See `docs/EMPIRICAL_CONTRACT.md` hyperparameter section.
 """
 
 from __future__ import annotations
@@ -32,6 +45,15 @@ class DeepGamblersMethod(Method):
     #: auxiliaries tracked in Method() with the reported primary score.
     AVAILABLE = ("msp", "entropy", "energy", "logit_margin", "dg_r")
 
+    def __init__(self, train_cfg: dict):
+        super().__init__(train_cfg)
+        m = train_cfg["method"]
+        configured = int(m["pretrain"]) if m.get("pretrain") is not None else None
+        if configured is None and self._reward() < 6.1:
+            # Paper's CIFAR-10 default: pretrain 100 CE epochs at low reward.
+            configured = 100
+        self.pretrain = configured or 0
+
     def default_score(self) -> str:
         return "dg_r"
 
@@ -50,9 +72,14 @@ class DeepGamblersMethod(Method):
     def train_loss(self, batch, state) -> dict:
         x, y = batch[0], batch[1]
         raw = self.backbone(x).logits
+        # Pretrain phase: plain CE over the C main classes (reservation neuron
+        # is not supervised yet), matching the paper's --pretrain semantics.
+        if state is not None and state.epoch < self.pretrain:
+            ce = F.cross_entropy(raw[:, : self.num_classes], y)
+            return {"ce": ce, "phase": 0}
         p = F.softmax(raw, dim=1)
         gain = p.gather(1, y.view(-1, 1)).squeeze(1)
         reservation = p[:, self.num_classes]
         doubling = torch.log(gain + reservation / self._reward())
         dg = -doubling.mean()
-        return {"dg": dg}
+        return {"dg": dg, "phase": 1}

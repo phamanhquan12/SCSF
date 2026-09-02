@@ -149,6 +149,33 @@ def test_dg_doubling_rate_and_reservation_helpers():
     assert m.num_outputs == 11  # C + 1 reservation neuron
 
 
+def test_dg_pretrain_phase_switches_ce_to_gambler_loss():
+    """The paper's low-reward CE-pretrain phase must gate the loss.
+
+    With reward < 6.1 the official DG code pretrains with plain cross-entropy
+    for ~100 epochs, otherwise the gambler objective collapses to the trivial
+    always-abstain point. During pretrain we must return a CE loss over the C
+    main classes; after pretrain we return the gambler loss.
+    """
+    # low reward -> default pretrain kicks in (reward defaults to 2.2 here)
+    m = build_method("dg", _cfg())
+    assert m.pretrain >= 1
+    y = torch.tensor([3, 2, 1, 0])
+    ph = lambda e: type("S", (), {"epoch": e})()
+    out_pre = m.train_loss((torch.zeros(4, 3, 32, 32), y), ph(0))
+    assert "ce" in out_pre and "dg" not in out_pre      # pretrain uses CE
+    assert out_pre["phase"] == 0
+    out_post = m.train_loss((torch.zeros(4, 3, 32, 32), y), ph(m.pretrain))
+    assert "dg" in out_post and "ce" not in out_post    # gambler after pretrain
+    assert out_post["phase"] == 1
+    assert torch.isfinite(out_pre["ce"]) and torch.isfinite(out_post["dg"])
+    # explicit high reward with pretrain=0 disables the phase
+    m2 = build_method("dg", _cfg(reward=25.0, pretrain=0))
+    assert m2.pretrain == 0
+    out = m2.train_loss((torch.zeros(4, 3, 32, 32), y), ph(0))
+    assert "dg" in out  # no CE-only pretrain phase at high reward
+
+
 def test_sat_history_buffer_mixes_and_persists():
     sat = SelfAdaptiveTrainingLoss(num_examples=6, num_classes=3, mom=0.9)
     x = torch.randn(2, 4)  # C=3 main logits + 1 reservation column
