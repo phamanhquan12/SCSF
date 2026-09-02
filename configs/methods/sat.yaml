@@ -1,6 +1,7 @@
 default_score: sat_conf
 method:
   score: sat_conf
-  mom: 0.9
+  sat_mom: 0.9
+  pretrain: 0
   official_train_size: 50000
 citation: Self-Adaptive Training, NeurIPS 2021 (Huang et al.)

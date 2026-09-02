@@ -63,7 +63,28 @@ class _VGGHead(nn.Sequential):
             nn.Dropout2d(0.5),
             nn.Linear(512, num_classes),
         )
+
+
+class VGG16BN(Backbone):
+    registry_name = "vgg16_bn"
+
+    def __init__(self, num_classes: int, input_size: int = 32, channels: int = 3):
+        super().__init__(num_classes, input_size, channels)
+        self.base_model = nn.Module()
+        self.base_model.features = _make_features(CIFAR_VGG16_CFG, batch_norm=True)
+        self.base_model.classifier = _VGGHead(num_classes)
+        # Match models/cifar/vgg.py from Deep Gamblers/CCL-SC: initialize the
+        # complete model only after both feature and classifier modules exist.
+        # Initializing only _VGGHead would leave convolutions at PyTorch's
+        # default Kaiming-uniform distribution.
         self._initialize_weights()
+        self.features = self.base_model.features
+        self.classifier = self.base_model.classifier
+        self.final_dim = 512
+        self._pool_idx = [i for i, m in enumerate(self.features) if isinstance(m, nn.MaxPool2d)]
+        assert len(self._pool_idx) == 5, "expected 5 max pools"
+        self.taps = OrderedDict((f"pool{i + 1}", self.features[idx]) for i, idx in enumerate(self._pool_idx))
+        self.roles = {"top_l1": "pool5", "top_l2": "pool4"}
 
     def _initialize_weights(self):
         for m in self.modules():
@@ -76,26 +97,8 @@ class _VGGHead(nn.Sequential):
                 m.weight.data.fill_(1)
                 m.bias.data.zero_()
             elif isinstance(m, nn.Linear):
-                n = m.weight.size(1)
                 m.weight.data.normal_(0, 0.01)
                 m.bias.data.zero_()
-
-
-class VGG16BN(Backbone):
-    registry_name = "vgg16_bn"
-
-    def __init__(self, num_classes: int, input_size: int = 32, channels: int = 3):
-        super().__init__(num_classes, input_size, channels)
-        self.base_model = nn.Module()
-        self.base_model.features = _make_features(CIFAR_VGG16_CFG, batch_norm=True)
-        self.base_model.classifier = _VGGHead(num_classes)
-        self.features = self.base_model.features
-        self.classifier = self.base_model.classifier
-        self.final_dim = 512
-        self._pool_idx = [i for i, m in enumerate(self.features) if isinstance(m, nn.MaxPool2d)]
-        assert len(self._pool_idx) == 5, "expected 5 max pools"
-        self.taps = OrderedDict((f"pool{i + 1}", self.features[idx]) for i, idx in enumerate(self._pool_idx))
-        self.roles = {"top_l1": "pool5", "top_l2": "pool4"}
 
     def forward_backbone(self, x) -> BackboneOutput:
         features, flat = self._embed(x)

@@ -8,7 +8,12 @@ from scripts.analyze_gate import (
     canonical_method,
     gate,
 )
-from scripts.gen_manifest import _ccl_vgg_supplement_rows, _gate_rows
+from scripts.gen_manifest import (
+    _ccl_vgg_supplement_rows,
+    _gate_rows,
+    _reference_anchor_rows,
+    _reference_ours_rows,
+)
 
 
 def _row(dataset, method, score, seed, aurc, acc=0.9, mode=None, commit="abc123"):
@@ -138,3 +143,19 @@ def test_gate_manifest_contains_matched_vgg_ccl_sc_runs():
         for dataset in ("cifar10", "cifar100")
         for seed in LOCKED_SEEDS
     }
+
+
+def test_reference_manifest_prioritizes_ours_and_uses_reference_recipe():
+    rows = list(_reference_ours_rows())
+    assert len(rows) == 30
+    assert {row[4] for row in rows} == {"sage_ds", "depthfrag", "riskflow"}
+    assert {row[2] for row in rows} == {"cifar10", "cifar100"}
+    assert {row[3] for row in rows} == {"vgg16_bn"}
+    assert all("recipe=ccl_sc_reference" in row[8] for row in rows)
+    assert len([row for row in rows if row[1] == "R0"]) == 6
+    assert {row[6] for row in rows if row[1] == "R0"} == {13}
+
+    anchors = list(_reference_anchor_rows())
+    assert len(anchors) == 20
+    assert {row[4] for row in anchors} == {"ce", "ccl_sc"}
+    assert all("recipe=ccl_sc_reference" in row[8] for row in anchors)

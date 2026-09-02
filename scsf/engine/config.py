@@ -139,15 +139,33 @@ def resolve(overrides: dict) -> dict:
     cfg.update(mtd_layer)
     cfg.update(rcp_layer)
 
-    # per-backbone recipe dispatch (e.g. adamw for transformers, sgd for CNNs)
+    # Per-backbone recipe dispatch (e.g. AdamW for transformers, SGD for CNNs).
     dispatch = (rcp_layer.get("by_backbone", {}) or {}).get(backbone, {})
     if dispatch:
         cfg.setdefault("train", {}).update(dispatch)
-    # per-method recipe overrides (e.g. paper pretrain lengths)
+
+    # Per-dataset recipe dispatch.  Reference protocols frequently share one
+    # training recipe across CIFAR-10/100 while retaining dataset-specific
+    # method constants (e.g. CCL-SC queue size and DG reward).  Keeping those
+    # constants in the recipe makes the resolved cfg the auditable source of
+    # truth instead of hiding them in manifest-generation conditionals.
+    dataset_dispatch = (rcp_layer.get("by_dataset", {}) or {}).get(dataset, {})
+    if dataset_dispatch:
+        _deep_merge(cfg, dataset_dispatch)
+
+    # Per-method recipe overrides (e.g. paper pretrain lengths).
     per_method = (rcp_layer.get("methods", {}) or {}).get(method_name, {})
     if per_method:
         meth = dict(cfg.get("method", {}) or {})
         meth.update(per_method.get("method", per_method))
+        cfg["method"] = meth
+
+    # Dataset-specific method constants take precedence over the global
+    # method block.  Schema: by_dataset.<dataset>.methods.<method_name>.
+    dataset_method = (dataset_dispatch.get("methods", {}) or {}).get(method_name, {})
+    if dataset_method:
+        meth = dict(cfg.get("method", {}) or {})
+        meth.update(dataset_method.get("method", dataset_method))
         cfg["method"] = meth
 
     # canonical schema keys

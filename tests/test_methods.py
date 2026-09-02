@@ -135,18 +135,22 @@ def test_selectivenet_selector_output_is_conf_and_scores_present():
 
 
 def test_dg_doubling_rate_and_reservation_helpers():
-    from scsf.methods.ce import _dg_r, _reservation
+    from scsf.methods.ce import _dg_conf, _dg_r, _reservation
 
     raw = torch.tensor([[3.0, 1.0, 0.0, 0.0], [0.0, 2.0, 1.0, 0.5]])
     res = _reservation(raw, 3)
     assert torch.allclose(res, torch.softmax(raw, dim=1)[:, 3])
+    conf = _dg_conf(raw, 3)
+    assert torch.allclose(conf, 1.0 - res)
     dg = _dg_r(raw, 3)
-    assert dg[0] > dg[1]  # higher main-class logsumexp -> higher reject stat
+    assert dg[0] > dg[1]  # legacy diagnostic: higher main-class logsumexp
     m = build_method("dg", _cfg())
     x = torch.zeros(4, 3, 32, 32)
     out = m.train_loss((x, torch.zeros(4, dtype=torch.long)), None)
     assert "dg" in out and torch.isfinite(out["dg"]) and out["dg"] > 0
     assert m.num_outputs == 11  # C + 1 reservation neuron
+    pred = m.predict_batch(x)
+    assert pred.scores["dg_conf"] is pred.confidence
 
 
 def test_dg_pretrain_phase_switches_ce_to_gambler_loss():
@@ -174,6 +178,30 @@ def test_dg_pretrain_phase_switches_ce_to_gambler_loss():
     assert m2.pretrain == 0
     out = m2.train_loss((torch.zeros(4, 3, 32, 32), y), ph(0))
     assert "dg" in out  # no CE-only pretrain phase at high reward
+
+
+def test_vgg_convolutions_use_official_normal_initialization():
+    from scsf.backbones.vgg import vgg16_bn
+
+    torch.manual_seed(7)
+    model = vgg16_bn(num_classes=10)
+    conv = next(module for module in model.modules() if isinstance(module, torch.nn.Conv2d))
+    expected_std = math.sqrt(2.0 / (3 * 3 * conv.out_channels))
+    assert abs(float(conv.weight.detach().mean())) < expected_std * 0.12
+    assert math.isclose(float(conv.weight.detach().std()), expected_std, rel_tol=0.12)
+    assert torch.count_nonzero(conv.bias) == 0
+
+
+def test_sat_reference_pretrain_switches_ce_to_sat():
+    m = build_method("sat", _cfg(pretrain=2))
+    x = torch.zeros(4, 3, 32, 32)
+    y = torch.tensor([3, 2, 1, 0])
+    idx = torch.arange(4)
+    ph = lambda e: type("S", (), {"epoch": e})()
+    pre = m.train_loss((x, y, idx), ph(0))
+    post = m.train_loss((x, y, idx), ph(2))
+    assert "ce" in pre and pre["phase"] == 0
+    assert "sat" in post and post["phase"] == 1
 
 
 def test_sat_history_buffer_mixes_and_persists():

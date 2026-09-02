@@ -1,27 +1,27 @@
-# Paper track: per-paper reproduction schedules (VGG/SCSF 300-epoch step-ish).
+# Deprecated compatibility name for the CCL-SC CIFAR reference schedule.
+# New manifests use recipe=ccl_sc_reference so old and corrected artifacts
+# cannot collide. Keep this file aligned to avoid a misleading "paper" recipe.
 train:
   epochs: 300
-  batch_size: 128
+  batch_size: 64
   optimizer: sgd
   scheduler: step
   lr: 0.1
   momentum: 0.9
   weight_decay: 0.0005
-  milestones: [25, 60, 100, 150, 200, 250, 275]
+  milestones: [25, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275]
   gamma: 0.5
   eval_every: 1
   save_every: 5
   guard_delta_acc: 1.0
-methods:
-  scsf:
-    pretrain: 100
-  ccl_sc:
-    pretrain: 150
-    queue_size: 3000
-    temperature: 0.1
-    memo_m: 0.999
-  dg:
-    reward: 2.2
-  sat: {}
-  selectivenet: {}
-  ce: {}
+by_dataset:
+  cifar10:
+    methods:
+      ccl_sc: {pretrain: 150, queue_size: 300, temperature: 0.1, memo_m: 0.999, reward: 0.5}
+      dg: {pretrain: 100, reward: 2.2}
+      sat: {pretrain: 0, sat_mom: 0.9}
+  cifar100:
+    methods:
+      ccl_sc: {pretrain: 150, queue_size: 3000, temperature: 0.1, memo_m: 0.99, reward: 1.0}
+      dg: {pretrain: 200, reward: 4.6}
+      sat: {pretrain: 200, sat_mom: 0.9}

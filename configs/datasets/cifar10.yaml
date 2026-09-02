@@ -6,6 +6,7 @@ data:
   official_train_size: 50000
   normalize:
     mean: [0.4914, 0.4822, 0.4465]
-    std: [0.2470, 0.2435, 0.2616]
+    # Deep Gamblers and CCL-SC official CIFAR protocol.
+    std: [0.2023, 0.1994, 0.2010]
   num_workers: 4
   download: false

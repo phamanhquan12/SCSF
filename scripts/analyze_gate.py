@@ -29,7 +29,7 @@ RECIPE = "backbone_transfer"
 
 BASELINE_SCORES = {
     "ce": "msp",
-    "dg": "dg_r",
+    "dg": "dg_conf",
     "selectivenet": "selection",
     "sat": "sat_conf",
     "scsf_posthoc": "scsf_conf",

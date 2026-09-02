@@ -36,6 +36,7 @@ from scsf.engine.config import resolve  # noqa: E402
 SEEDS = (13, 17, 23, 29, 31)
 B_BASELINE_SEEDS = (13, 17, 23)  # cheap screen (Stage B)
 RECIPE = "backbone_transfer"
+REFERENCE_RECIPE = "ccl_sc_reference"
 
 BASELINES = [
     ("ce", None),
@@ -53,6 +54,12 @@ METHODS = BASELINES + [
     ("riskflow", None),
 ]
 
+PRIMARY_METHODS = [
+    ("sage_ds", None),
+    ("depthfrag", None),
+    ("riskflow", None),
+]
+
 B_SCREEN_METHODS = [
     ("sage_ds", None),
     ("depthfrag", None),
@@ -64,21 +71,11 @@ B_SCREEN_METHODS = [
 BACKBONES = ("resnet18", "vgg16_bn", "wideresnet28_10", "convnext_tiny", "deit_s")
 DATASETS = ("cifar10", "cifar100")
 
-# Skip rules: only skip if the ORIGINAL baseline paper published results for
-# that exact backbone+dataset.  When uncertain, err on the side of running.
-SKIP_RULES = {
-    # Deep Gamblers (Chen et al. 2020): published ResNet-18 on CIFAR-10/100
-    "dg": {"resnet18"},
-    # SelectiveNet (Geifman & El-Yaniv 2019): published ResNet-18 on CIFAR-10/100
-    "selectivenet": {"resnet18"},
-    # SAT (Zhang et al. 2019): published ResNet-18 on CIFAR-10/100
-    "sat": {"resnet18"},
-    # CCL-SC published VGG16-BN results, but it remains a required *matched*
-    # baseline for the new VGG16-BN gate.  Published numbers are only a sanity
-    # check because our split/recipe/selection protocol differs.  ResNet-18 is
-    # the sole paper-result skip.
-    "ccl_sc": {"resnet18"},
-}
+# Generic cross-backbone manifests cannot substitute a paper result from a
+# different architecture.  The previous ResNet-18 skips were not supported by
+# the cited DG/CCL-SC sources, so the generic matrix skips nothing.  Published
+# VGG16-BN substitutions live only in the explicit reference manifests.
+SKIP_RULES = {}
 
 
 def _skip(method: str, backbone: str) -> bool:
@@ -256,6 +253,46 @@ def _ccl_vgg_supplement_rows():
             pri += 1
 
 
+def _reference_ours_rows():
+    """Ours-first VGG gate under the ICML-2024 CCL-SC CIFAR recipe.
+
+    Seed 13 for all six method/dataset cells is deliberately first: this gives
+    the outer loop a comparable early signal before committing the remaining
+    four seeds.  Only proposed methods are emitted.  Published CCL-SC/SR/DG/
+    SAT curves provide the hard-coverage reference; metrics absent from the
+    paper require the separate anchor manifest below.
+    """
+    pri = 0
+    for seeds, stage in (((13,), "R0"), ((17, 23, 29, 31), "R1")):
+        for dataset in DATASETS:
+            for method, mode in PRIMARY_METHODS:
+                for seed in seeds:
+                    run_dir, args = _cli(method, mode, dataset, "vgg16_bn", seed,
+                                         REFERENCE_RECIPE, "{RR}")
+                    yield (pri, stage, dataset, "vgg16_bn", method, mode or "",
+                           seed, run_dir, args)
+                    pri += 1
+
+
+def _reference_anchor_rows():
+    """Minimal reruns needed for metrics CCL-SC did not publish.
+
+    CCL-SC reports selective risk at fixed coverages, but not full-prefix AURC
+    or failure AUROC.  CE/SR and CCL-SC are therefore retained as optional
+    matched anchors for those two primary metrics; expensive legacy baselines
+    with published hard-coverage curves are intentionally omitted.
+    """
+    pri = 0
+    for dataset in DATASETS:
+        for method in ("ce", "ccl_sc"):
+            for seed in SEEDS:
+                run_dir, args = _cli(method, None, dataset, "vgg16_bn", seed,
+                                     REFERENCE_RECIPE, "{RR}")
+                yield (pri, "RA", dataset, "vgg16_bn", method, "", seed,
+                       run_dir, args)
+                pri += 1
+
+
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--results_root", default="results")
@@ -264,20 +301,37 @@ def main(argv=None) -> None:
                     help="Generate a single gate.tsv manifest (VGG16-BN first)")
     ap.add_argument("--ccl-vgg-supplement", action="store_true",
                     help="Generate only the ten matched VGG16-BN CCL-SC jobs")
+    ap.add_argument("--reference-ours-first", action="store_true",
+                    help="Generate the 30 proposed-method VGG reference jobs, ours first")
+    ap.add_argument("--reference-anchors", action="store_true",
+                    help="Generate optional CE/CCL-SC jobs for AURC/AUROC anchors")
     args = ap.parse_args(argv)
     rr = args.results_root
     out_dir = args.out_dir or os.path.join(rr, "manifests")
     os.makedirs(out_dir, exist_ok=True)
     import csv
-    if args.gate or args.ccl_vgg_supplement:
+    special = sum(bool(x) for x in (args.gate, args.ccl_vgg_supplement,
+                                    args.reference_ours_first, args.reference_anchors))
+    if special > 1:
+        ap.error("choose at most one special manifest mode")
+    if special:
         rows = []
-        source = (_ccl_vgg_supplement_rows() if args.ccl_vgg_supplement
-                  else _gate_rows())
+        if args.ccl_vgg_supplement:
+            source = _ccl_vgg_supplement_rows()
+            filename = "gate_vgg_ccl_sc.tsv"
+        elif args.reference_ours_first:
+            source = _reference_ours_rows()
+            filename = "reference_ours_first.tsv"
+        elif args.reference_anchors:
+            source = _reference_anchor_rows()
+            filename = "reference_metric_anchors.tsv"
+        else:
+            source = _gate_rows()
+            filename = "gate.tsv"
         for row in source:
             run_dir, cli = row[7], row[8].replace("{RR}", rr)
             rows.append((row[0], row[1], row[2], row[3], row[4], row[5],
                          str(row[6]), run_dir.replace("{RR}", rr), cli))
-        filename = "gate_vgg_ccl_sc.tsv" if args.ccl_vgg_supplement else "gate.tsv"
         path = os.path.join(out_dir, filename)
         with open(path, "w", newline="") as f:
             w = csv.writer(f, delimiter="\t", lineterminator="\n")

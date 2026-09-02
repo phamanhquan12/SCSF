@@ -1,9 +1,9 @@
-default_score: dg_r
+default_score: dg_conf
 method:
-  score: dg_r
+  score: dg_conf
   reward: 2.2
   # Method-defining pretrain phase (official code --pretrain). When unset, the
   # method defaults to 100 CE-pretrain epochs on CIFAR when reward < 6.1
   # (paper: otherwise the gambler objective can collapse to always-abstain).
   pretrain: 100
-citation: Deep Gamblers, ICML 2019 (Ziyin et al.); official code NIPS2019DeepGamblers --pretrain
+citation: Deep Gamblers, NeurIPS 2019 (Liu et al.); official code NIPS2019DeepGamblers --pretrain

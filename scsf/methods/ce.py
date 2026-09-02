@@ -31,8 +31,18 @@ def _reservation(raw_logits, num_classes):
     return torch.softmax(raw_logits, dim=1)[:, num_classes]
 
 
+def _dg_conf(raw_logits, num_classes):
+    """Official Deep Gamblers keep score: inverse reservation probability.
+
+    The authors rank examples by ascending reservation probability.  Our
+    metrics contract expects larger values to mean "keep", so ``1-p_res`` is
+    the exactly rank-equivalent confidence.
+    """
+    return 1.0 - _reservation(raw_logits, num_classes)
+
+
 def _dg_r(raw_logits, num_classes):
-    """Deep Gamblers' reject statistic: logsumexp over the C main logits."""
+    """Legacy main-logit mass score retained only as a diagnostic ablation."""
     main = raw_logits[:, : num_classes]
     return torch.logsumexp(main, dim=1)
 

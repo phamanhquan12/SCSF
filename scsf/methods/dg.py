@@ -8,11 +8,11 @@ neuron**. Training uses the official doubling-rate objective::
     doubling_rate = log(gain + p[:, C] / reward)
     loss = -mean(doubling_rate)
 
-Inference is selective-classification: the model must keep working like a
-plain classifier over the first C classes (argmax confidence ∈ [0, C)), while
-``R = logsumexp(main logits)`` is the paper's reject statistic used to rank
-abstention (higher = keep). We report the standard CE scores over the main
-classes as auxiliary scores too.
+Inference is selective-classification: the model predicts over the first C
+classes and ranks examples by the official reservation neuron.  The reference
+code sorts by ascending ``p_reservation``; under our higher-is-keep convention
+the primary score is therefore ``dg_conf = 1 - p_reservation``.  The former
+``logsumexp(main logits)`` score remains available only as a diagnostic.
 
 Pretraining phase
 -----------------
@@ -34,7 +34,7 @@ import torch
 import torch.nn.functional as F
 
 from .base import Method
-from .ce import _dg_r, _reservation
+from .ce import _dg_conf, _dg_r, _reservation
 from .scores import compute_scores
 
 
@@ -43,7 +43,7 @@ class DeepGamblersMethod(Method):
     output_offset = 1
 
     #: auxiliaries tracked in Method() with the reported primary score.
-    AVAILABLE = ("msp", "entropy", "energy", "logit_margin", "dg_r")
+    AVAILABLE = ("msp", "entropy", "energy", "logit_margin", "dg_conf", "dg_r")
 
     def __init__(self, train_cfg: dict):
         super().__init__(train_cfg)
@@ -55,13 +55,14 @@ class DeepGamblersMethod(Method):
         self.pretrain = configured or 0
 
     def default_score(self) -> str:
-        return "dg_r"
+        return "dg_conf"
 
     def default_scores(self):
         return self.AVAILABLE
 
     def _scores(self, bo):
         scores = compute_scores(bo.logits[:, : self.num_classes], self.AVAILABLE)
+        scores["dg_conf"] = _dg_conf(bo.logits, self.num_classes)
         scores["dg_r"] = _dg_r(bo.logits, self.num_classes)
         scores["reservation"] = _reservation(bo.logits, self.num_classes)
         return scores

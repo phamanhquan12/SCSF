@@ -77,6 +77,7 @@ class SATMethod(Method):
 
     def __init__(self, train_cfg: dict):
         super().__init__(train_cfg)
+        self.pretrain = int(train_cfg["method"].get("pretrain", 0))
         # history buffer spans the full official training fold (global indices)
         self.sat = SelfAdaptiveTrainingLoss(
             num_examples=int(train_cfg["data"].get("official_train_size", 50000)),
@@ -93,8 +94,10 @@ class SATMethod(Method):
     def train_loss(self, batch, state) -> dict:
         x, y, index = batch[0], batch[1], batch[2]
         raw = self.backbone(x).logits
+        if state is not None and state.epoch < self.pretrain:
+            return {"ce": F.cross_entropy(raw[:, : self.num_classes], y), "phase": 0}
         sat_loss = self.sat(raw, y, index.to(raw.device))
-        return {"sat": sat_loss}
+        return {"sat": sat_loss, "phase": 1}
 
 
 __all__ = ["SATMethod", "SelfAdaptiveTrainingLoss"]

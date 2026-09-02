@@ -1,0 +1,57 @@
+# CIFAR reference protocol from CCL-SC (ICML 2024, Appendix D).
+#
+# Shared training settings for every method on both CIFAR datasets:
+# VGG16-BN, 300 epochs, batch 64, SGD(lr=.1, momentum=.9, wd=5e-4), and
+# multiplicative LR decay 0.5 every 25 epochs.  Dataset-specific entries below
+# are method constants reported by CCL-SC, not changes to the shared optimizer.
+train:
+  epochs: 300
+  batch_size: 64
+  optimizer: sgd
+  scheduler: step
+  lr: 0.1
+  momentum: 0.9
+  weight_decay: 0.0005
+  milestones: [25, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275]
+  gamma: 0.5
+  eval_every: 1
+  save_every: 5
+  guard_delta_acc: 1.0
+
+by_dataset:
+  cifar10:
+    methods:
+      ccl_sc:
+        pretrain: 150
+        queue_size: 300
+        temperature: 0.1
+        memo_m: 0.999
+        reward: 0.5
+      dg:
+        pretrain: 100
+        reward: 2.2
+      sat:
+        pretrain: 0
+        sat_mom: 0.9
+  cifar100:
+    methods:
+      ccl_sc:
+        pretrain: 150
+        queue_size: 3000
+        temperature: 0.1
+        memo_m: 0.99
+        reward: 1.0
+      dg:
+        pretrain: 200
+        reward: 4.6
+      sat:
+        pretrain: 200
+        sat_mom: 0.9
+
+reference:
+  paper: Confidence-aware Contrastive Learning for Selective Classification
+  venue: ICML 2024
+  url: https://proceedings.mlr.press/v235/wu24s.html
+  deviations:
+    - Uses the locked leakage-free 45k/5k train/validation split.
+    - Selects deployment checkpoints by the pre-registered AURC/accuracy guard.

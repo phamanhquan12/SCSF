@@ -100,6 +100,33 @@ def test_vgg_backbone_dispatch_defaults():
     assert cfg["backbones"]["vgg16_bn"]["input_size"] == 32
 
 
+def test_ccl_sc_reference_recipe_matches_paper_and_dispatches_by_dataset():
+    common = {"backbone": "vgg16_bn", "recipe": "ccl_sc_reference"}
+    c10 = config.resolve({**common, "dataset": "cifar10", "method_name": "ccl_sc"})
+    c100 = config.resolve({**common, "dataset": "cifar100", "method_name": "ccl_sc"})
+    for cfg in (c10, c100):
+        assert cfg["train"]["epochs"] == 300
+        assert cfg["train"]["batch_size"] == 64
+        assert cfg["train"]["optimizer"] == "sgd"
+        assert cfg["train"]["scheduler"] == "step"
+        assert cfg["train"]["milestones"] == list(range(25, 300, 25))
+        assert cfg["train"]["gamma"] == 0.5
+    for key, value in {
+        "pretrain": 150, "queue_size": 300, "memo_m": 0.999, "reward": 0.5,
+    }.items():
+        assert c10["method"][key] == value
+    for key, value in {
+        "pretrain": 150, "queue_size": 3000, "memo_m": 0.99, "reward": 1.0,
+    }.items():
+        assert c100["method"][key] == value
+
+    dg10 = config.resolve({**common, "dataset": "cifar10", "method_name": "dg"})
+    dg100 = config.resolve({**common, "dataset": "cifar100", "method_name": "dg"})
+    assert (dg10["method"]["reward"], dg10["method"]["pretrain"]) == (2.2, 100)
+    assert (dg100["method"]["reward"], dg100["method"]["pretrain"]) == (4.6, 200)
+    assert dg10["method"]["score"] == "dg_conf"
+
+
 # ---------------------------------------------------------------------------
 
 
