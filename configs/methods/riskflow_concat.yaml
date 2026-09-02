@@ -1,0 +1,13 @@
+# RiskFlow ablation 1: SCSF-style concatenation head (all pooled taps + final
+# embedding -> scalar confidence head). Equivalent supervised capacity, no
+# intermediate state/innovation mechanism.
+default_score: riskflow
+method:
+  score: riskflow
+  mode: concat
+  use_soft: false
+  freeze_backbone: false
+  token: cls
+  cat_lo: 0.3
+  cat_hi: 0.7
+citation: RiskFlow ablation 1 - SCSF-style concatenation head

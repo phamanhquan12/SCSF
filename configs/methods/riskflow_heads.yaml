@@ -1,0 +1,14 @@
+# RiskFlow ablation 2: independent intermediate error heads + learned weighted
+# sum. This is the TULIP/deep-exit-style control: without a persistent state or
+# conditional innovations this is NOT the RiskFlow novelty.
+default_score: riskflow
+method:
+  score: riskflow
+  mode: heads
+  use_soft: false
+  freeze_backbone: false
+  state_dim: 64
+  token: cls
+  cat_lo: 0.3
+  cat_hi: 0.7
+citation: RiskFlow ablation 2 - independent intermediate error heads + learned weighted sum

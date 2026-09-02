@@ -1,0 +1,16 @@
+# RiskFlow ablation 3: shared cumulative state WITHOUT residual innovation
+# targets (terminal proper-scoring loss only), fixed per-depth gates.
+default_score: riskflow
+method:
+  score: riskflow
+  mode: cum
+  use_soft: false
+  freeze_backbone: false
+  state_dim: 64
+  cell_hidden: 64
+  token: cls
+  term_scale: 1.0
+  huber_delta: 1.0
+  cat_lo: 0.3
+  cat_hi: 0.7
+citation: RiskFlow ablation 3 - shared cumulative state, no residual targets

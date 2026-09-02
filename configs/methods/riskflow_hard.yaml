@@ -1,0 +1,18 @@
+# RiskFlow ablation 7: hard-error channel ONLY (soft difficulty channel
+# disabled). Isolates the contribution of the continuous difficulty channel.
+default_score: riskflow
+method:
+  score: riskflow
+  mode: riskflow
+  use_soft: false
+  freeze_backbone: false
+  state_dim: 64
+  cell_hidden: 64
+  token: cls
+  innov_scale: 1.0
+  term_scale: 1.0
+  decorr_scale: 0.01
+  huber_delta: 1.0
+  cat_lo: 0.3
+  cat_hi: 0.7
+citation: RiskFlow ablation 7 - hard-error channel only

@@ -1,0 +1,20 @@
+# RiskFlow default: residual innovation + sample-dependent gates, hard + soft
+# channels. Inference score is the error-risk channel (confidence = -s_hard_L).
+# The soft difficulty channel is a persistent but auxiliary training signal
+# (excluded from deployment parameter counts).
+default_score: riskflow
+method:
+  score: riskflow
+  mode: riskflow
+  use_soft: true
+  freeze_backbone: false
+  state_dim: 64
+  cell_hidden: 64
+  token: cls
+  innov_scale: 1.0
+  term_scale: 1.0
+  decorr_scale: 0.01
+  huber_delta: 1.0
+  cat_lo: 0.3
+  cat_hi: 0.7
+citation: RiskFlow default - accumulate conditional failure innovations (residual innovation + sample-dependent gates)

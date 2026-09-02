@@ -17,6 +17,14 @@ from .depthfrag import (  # noqa: F401
     params_reached_by_probes,
     probe_gradient_report,
 )
+from .riskflow import (  # noqa: F401
+    InputAdapter,
+    RiskCell,
+    RiskFlowMethod,
+    RiskFlowTrace,
+    decorrelation_penalty,
+    pool_tap,
+)
 from .scores import (  # noqa: F401
     SCORE_FUNCS,
     compute_scores,
@@ -47,6 +55,12 @@ __all__ = [
     "GradNormAccumulator",
     "params_reached_by_probes",
     "probe_gradient_report",
+    "RiskFlowMethod",
+    "RiskCell",
+    "InputAdapter",
+    "RiskFlowTrace",
+    "decorrelation_penalty",
+    "pool_tap",
     "msp",
     "entropy",
     "negative_entropy",

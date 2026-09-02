@@ -13,6 +13,7 @@ from .scsf import SCSFMethod
 from .selectivenet import SelectiveNetMethod
 from .sage_ds import SageDSMethod
 from .depthfrag import DepthFragMethod
+from .riskflow import RiskFlowMethod
 
 _REGISTRY: Dict[str, Callable[..., Method]] = {}
 
@@ -58,6 +59,15 @@ for _n, _b in [
     ("depthfrag_raw", DepthFragMethod),
     ("depthfrag_frozen", DepthFragMethod),
     ("depthfrag_clip", DepthFragMethod),
+    # RiskFlow: a single class driven by the mode config (ablation ladder +
+    # frozen control + hard-channel-only control).
+    ("riskflow", RiskFlowMethod),
+    ("riskflow_concat", RiskFlowMethod),
+    ("riskflow_heads", RiskFlowMethod),
+    ("riskflow_cum", RiskFlowMethod),
+    ("riskflow_resid", RiskFlowMethod),
+    ("riskflow_frozen", RiskFlowMethod),
+    ("riskflow_hard", RiskFlowMethod),
 ]:
     register_method(_n, _b)
 

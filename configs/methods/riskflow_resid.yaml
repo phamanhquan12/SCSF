@@ -1,0 +1,19 @@
+# RiskFlow ablation 4: cumulative state WITH residual innovation targets but
+# sample-INDEPENDENT (fixed, per-depth learnable) gates. Distinguishes the
+# value of the residual targets from the value of the per-example gate.
+default_score: riskflow
+method:
+  score: riskflow
+  mode: resid
+  use_soft: false
+  freeze_backbone: false
+  state_dim: 64
+  cell_hidden: 64
+  token: cls
+  innov_scale: 1.0
+  term_scale: 1.0
+  decorr_scale: 0.0
+  huber_delta: 1.0
+  cat_lo: 0.3
+  cat_hi: 0.7
+citation: RiskFlow ablation 4 - cumulative state + residual innovation targets, fixed gates

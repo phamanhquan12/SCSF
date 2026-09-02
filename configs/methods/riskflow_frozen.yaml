@@ -1,0 +1,19 @@
+# RiskFlow ablation 6: frozen-backbone RiskFlow (control). Identical state/gate
+# capacity but the backbone does not receive auxiliary gradients; used to
+# separate "confidence mechanism" gains from representation shaping.
+default_score: riskflow
+method:
+  score: riskflow
+  mode: riskflow
+  use_soft: true
+  freeze_backbone: true
+  state_dim: 64
+  cell_hidden: 64
+  token: cls
+  innov_scale: 1.0
+  term_scale: 1.0
+  decorr_scale: 0.01
+  huber_delta: 1.0
+  cat_lo: 0.3
+  cat_hi: 0.7
+citation: RiskFlow ablation 6 - frozen-backbone control
