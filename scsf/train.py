@@ -14,11 +14,12 @@ from .engine.trainer import Trainer
 def main(argv=None) -> dict:
     from .engine.seeding import _DEFAULT
     overrides = overrides_from_cli(argv)
+    resume_from = overrides.pop("resume_from", None)
     cfg = resolve(overrides)
     os.environ.setdefault("SCSF_DATA_SEED", str(cfg["train"]["seed"]))
     run_dir = os.path.join(cfg["results_root"], cfg["run_name"])
     trainer = Trainer(cfg, run_dir)
-    out = trainer.run()
+    out = trainer.run(resume_from=resume_from)
     print(f"done: {run_dir}")
     return out
 

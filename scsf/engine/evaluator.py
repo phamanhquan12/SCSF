@@ -33,6 +33,7 @@ def _registry_row(cfg, manifest, split, metrics, created_at, run_dir):
         split=split,
         commit=manifest.get("commit", ""),
         dirty=manifest.get("dirty", ""),
+        config_hash=manifest.get("config_hash", ""),
         n=int(metrics["n"]),
         acc=f"{float(metrics['acc']):.6f}",
         err=f"{float(metrics['err']):.6f}",

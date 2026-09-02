@@ -21,6 +21,7 @@ classes and the engine are written against:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -209,4 +210,15 @@ def run_name_for(cfg: dict) -> str:
     default_score = cfg.get("default_score")
     if score and score != default_score:
         name += f".{score}"
+    # SCSF posthoc/e2e use the same method_name+score but distinct gradient
+    # semantics; disambiguate non-default modes so run dirs never collide.
+    mode = cfg.get("method", {}).get("mode")
+    if cfg.get("method_name") == "scsf" and mode and mode != "posthoc":
+        name += f".{mode}"
     return f"{name}-r{cfg['recipe']}-s{cfg['train'].get('seed', 13)}"
+
+
+def config_hash(cfg: dict) -> str:
+    """Canonical SHA-256 over the fully resolved config (manifest/registry)."""
+    payload = json.dumps(cfg, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()

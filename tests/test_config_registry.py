@@ -52,6 +52,30 @@ def test_resolve_keeps_run_name_unique_per_seed_and_score():
     assert a["run_name"] != b["run_name"]
 
 
+def test_scsf_mode_disambiguates_run_name():
+    post = config.resolve({"method_name": "scsf", "method": {"mode": "posthoc"}})
+    e2e = config.resolve({"method_name": "scsf", "method": {"mode": "e2e"}})
+    legacy = config.resolve({"method_name": "scsf",
+                             "method": {"mode": "legacy_partial_detach"}})
+    assert post["run_name"] != e2e["run_name"]
+    assert post["run_name"] != legacy["run_name"]
+    # the default (posthoc) keeps the classic name; non-defaults add a suffix
+    assert post["run_name"] == f"cifar10-resnet18-scsf-rsinglerun-s13"
+    assert e2e["run_name"].endswith("scsf.e2e-rsinglerun-s13")
+    # non-SCSF methods are untouched
+    ce = config.resolve({"method_name": "ce"})
+    assert ce["run_name"] == "cifar10-resnet18-ce-rsinglerun-s13"
+
+
+def test_config_hash_is_deterministic_and_sensitive():
+    a = config.resolve({"dataset": "cifar10", "train": {"seed": 13}})
+    b = config.resolve({"dataset": "cifar10", "train": {"seed": 13}})
+    c = config.resolve({"dataset": "cifar10", "train": {"seed": 17}})
+    assert config.config_hash(a) == config.config_hash(b)
+    assert config.config_hash(a) != config.config_hash(c)
+    assert len(config.config_hash(a)) == 64
+
+
 def test_dotted_cli_overrides_behavior_differs_from_resolve_dict():
     # dotted keys are a CLI-parsing artifact (overrides_from_cli); a raw dict
     # passed to resolve must be nested, otherwise the key is taken literally.
@@ -72,6 +96,7 @@ def test_vgg_backbone_dispatch_defaults():
 def test_registry_column_set_is_locked():
     assert "run_dir" in BASE_COLUMNS
     assert "split_hash" in BASE_COLUMNS
+    assert "config_hash" in BASE_COLUMNS
     assert "risk_at_cov_5" in BASE_COLUMNS
     assert "risk_at_cov_100" in BASE_COLUMNS
     assert "checkpoint_epoch" in BASE_COLUMNS

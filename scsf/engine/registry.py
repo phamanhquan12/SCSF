@@ -12,7 +12,7 @@ import os
 
 BASE_COLUMNS = [
     "run_dir", "dataset", "backbone", "method_name", "score", "seed", "recipe",
-    "split", "style", "split_hash", "commit", "dirty", "n", "acc", "err",
+    "split", "style", "split_hash", "config_hash", "commit", "dirty", "n", "acc", "err",
     "aurc", "auroc_error", "aupr_error", "excess_aurc", "mean_class_aurc",
     "worst_class_aurc",
 ] + [f"risk_at_cov_{q}" for q in (100, 99, 95, 90, 85, 80, 75, 70, 65, 60, 55, 50,

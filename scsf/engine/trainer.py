@@ -24,6 +24,7 @@ from ..version import __version__, package_versions
 from .checkpoint import CheckpointManager, SelectionTracker, _build_scheduler
 from .seeding import capture_global_state, make_generator, restore_global_state, seed_all
 from .registry import BASE_COLUMNS
+from .config import config_hash
 
 
 def _build_optimizers(method, cfg):
@@ -76,6 +77,8 @@ class Trainer:
         self.batch_index = 0
 
     def _build(self):
+        if getattr(self, "_built", False):
+            return
         seed_all(self.cfg["train"]["seed"])
         split = get_split(self.cfg)
         assert_no_official_test_leakage(split)
@@ -96,6 +99,7 @@ class Trainer:
             overfit=int(self.cfg["train"].get("overfit", 0)),
         )
         self.val_loader = build_dataloader(self.cfg, "val", shuffle=False, return_indices=True)
+        self._built = True
 
     # -- evaluation --------------------------------------------------------
     def _eval_val(self) -> dict:
@@ -131,7 +135,7 @@ class Trainer:
             "scheduler_state": self.scheduler.state_dict(),
             "rng": state,
             "val_metrics": val_metrics,
-            "selection_summary": self.selection.summary(),
+            "selection_state": self.selection.state(),
             "split_hashes": self.split_hashes,
         }
 
@@ -154,6 +158,7 @@ class Trainer:
             "commit": commit,
             "dirty": dirty,
             "split_hashes": self.split_hashes,
+            "config_hash": config_hash(self.cfg),
             "params_total": int(n_params),
             "logits": self.cfg["method_name"],
             "selection": self.selection.summary(),
@@ -162,6 +167,12 @@ class Trainer:
     # -- run -----------------------------------------------------------------
     def run(self, resume_from: str | None = None) -> dict:
         self._build()
+        os.makedirs(self.run_dir, exist_ok=True)
+        # Write the fully-resolved config at the start so a crashed run keeps a
+        # reproducible config (and resume uses the exact same cfg hash).
+        with open(os.path.join(self.run_dir, "cfg.json"), "w") as f:
+            json.dump(self.cfg, f, indent=2, sort_keys=True, default=str)
+
         start_epoch = 0
         if resume_from:
             payload = self.manager.load(resume_from, map_location=self.device)
@@ -170,25 +181,36 @@ class Trainer:
                 o.load_state_dict(s)
             self.scheduler.load_state_dict(payload["scheduler_state"])
             restore_global_state(payload["rng"], self.generator)
-            if "selection_summary" in payload:
+            if "selection_state" in payload:
+                self.selection.restore(payload["selection_state"])
+            elif "selection_summary" in payload:
                 self.selection.selected_epoch = payload["selection_summary"]["selected_epoch"]
-            start_epoch = int(payload.get("epoch", 0)) + 1
-            self.epoch = start_epoch
-            # re-position the persistent generator by replaying consumed batches
-            it = iter(self.train_loader)
-            for _ in range(int(payload.get("batch_index", 0))):
-                next(it)
-            self.batch_index = int(payload.get("batch_index", 0))
+            start_epoch = int(payload.get("epoch", 0))
+            if int(payload.get("batch_index", 0)) == 0:
+                # checkpoint sits at an epoch boundary: resume from its start.
+                # (Every live trainer snapshot is epoch-final; the generator
+                # state was captured at the end of that epoch, so the next
+                # draw is exactly the first batch of `start_epoch`.)
+                start_epoch += 1
+            else:
+                # mid-epoch snapshot: keep the epoch and resume from the batch
+                # after the saved one; the restored generator is already in the
+                # right position, so no replay is needed.
+                self.batch_index = int(payload.get("batch_index", 0))
+            self.epoch = start_epoch - 1
 
         best_seen = {"acc": -1.0}
         final_metrics = None
-        os.makedirs(self.run_dir, exist_ok=True)
 
         for epoch in range(start_epoch, int(self.cfg["train"]["epochs"])):
             self.epoch = epoch
             self.method.on_epoch_start(epoch)
             self.method.train()
-            for bi, batch in enumerate(self.train_loader):
+            # On a mid-epoch resume, keep counting the current epoch's batches
+            # from the resume position so batch-cadence triggers stay aligned.
+            batch_off = self.batch_index if epoch == start_epoch else 0
+            for bi_raw, batch in enumerate(self.train_loader):
+                bi = bi_raw + batch_off
                 self.batch_index = bi
                 loss_dict = self.method.train_loss(
                     tuple(t.to(self.device) if torch.is_tensor(t) else t for t in batch), self
@@ -199,6 +221,7 @@ class Trainer:
                 total.backward()
                 for opt in self.optimizers:
                     opt.step()
+            self.batch_index = 0
             self.scheduler.step()
             self.method.on_epoch_end(epoch, {})
 

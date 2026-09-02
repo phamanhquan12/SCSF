@@ -79,6 +79,23 @@ class SelectionTracker:
             "selection_rule": f"min_val_aurc_among_acc>=best_acc-{self.guard}pp",
         }
 
+    def state(self):
+        """Serializable full state for exact resume."""
+        return {
+            "candidates": [list(c) for c in self.candidates],
+            "best_acc": self.best_acc,
+            "best_aurc": self.best_aurc,
+            "selected_epoch": self.selected_epoch,
+            "best_epoch": self.best_epoch,
+        }
+
+    def restore(self, st) -> None:
+        self.candidates = [tuple(c) for c in st.get("candidates", [])]
+        self.best_acc = float(st.get("best_acc", float("-inf")))
+        self.best_aurc = float(st.get("best_aurc", float("inf")))
+        self.selected_epoch = st.get("selected_epoch")
+        self.best_epoch = st.get("best_epoch")
+
 
 class CheckpointManager:
     EXT = ".pt"
@@ -104,6 +121,10 @@ class CheckpointManager:
 
     def epoch_path(self, epoch: int) -> str:
         return self.ckpt_path(f"epoch_{epoch:03d}")
+
+    def _unwrap(self, tag: str, *, state: bool = False):
+        """Path to the checkpoint .state led by load-check flow parity."""
+        return self.load(tag)
 
     def load(self, tag: str, map_location="cpu"):
         return torch.load(self.ckpt_path(tag), map_location=map_location, weights_only=False)
