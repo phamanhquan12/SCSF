@@ -1,0 +1,16 @@
+# SAGE-DS supervision scale 1.0 (under/over-supervision curve point; no sweep now).
+default_score: msp
+method:
+  score: msp
+  topology: sparse_utility_safe
+  safety: true
+  utility: true
+  sparsity_cost: 0.5
+  supervision_scale: 1.0
+  utility_interval: 50
+  controller_lr: 0.05
+  utility_ema_beta: 0.99
+  hard_concrete_tau: 0.3
+  strength_cap: 0.5
+  use_risk_head: false
+citation: SAGE-DS supervision scale 1.0

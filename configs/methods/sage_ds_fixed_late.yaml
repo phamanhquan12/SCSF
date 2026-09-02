@@ -1,0 +1,11 @@
+# SAGE-DS ablation: fixed supervision at the two late semantic sites only.
+default_score: msp
+method:
+  score: msp
+  topology: fixed_late
+  safety: false
+  utility: false
+  fixed_sites: ["top_l2", "top_l1"]
+  supervision_scale: 1.0
+  use_risk_head: false
+citation: SAGE-DS fixed two-late-site supervision baseline (no controller, no safety)

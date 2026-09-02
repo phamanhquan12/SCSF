@@ -1,5 +1,14 @@
 from .base import Method, MethodPrediction  # noqa: F401
 from .factory import build_method, method_names, register_method  # noqa: F401
+from .sage_ds import (  # noqa: F401
+    ALL_TOPO,
+    Controller,
+    HardConcreteGate,
+    SageDSMethod,
+    project_aux,
+    params_reached_by_aux,
+    selective_utility,
+)
 from .scores import (  # noqa: F401
     SCORE_FUNCS,
     compute_scores,
@@ -17,6 +26,13 @@ __all__ = [
     "build_method",
     "register_method",
     "method_names",
+    "SageDSMethod",
+    "HardConcreteGate",
+    "Controller",
+    "project_aux",
+    "params_reached_by_aux",
+    "selective_utility",
+    "ALL_TOPO",
     "msp",
     "entropy",
     "negative_entropy",

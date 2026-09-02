@@ -1,4 +1,9 @@
 from .roc import average_precision, roc_auc  # noqa: F401
+from .surrogate import (  # noqa: F401
+    soft_aurc_surrogate,
+    soft_selective_risk,
+    selective_surrogate_gradient,
+)
 from .selective import (  # noqa: F401
     COVERAGE_GRID_PERCENT,
     all_metrics,
@@ -19,6 +24,9 @@ __all__ = [
     "COVERAGE_GRID_PERCENT",
     "roc_auc",
     "average_precision",
+    "soft_aurc_surrogate",
+    "soft_selective_risk",
+    "selective_surrogate_gradient",
     "errors",
     "stable_confidence_order",
     "risk_coverage_curve",

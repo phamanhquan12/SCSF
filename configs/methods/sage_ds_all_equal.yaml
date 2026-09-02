@@ -1,0 +1,10 @@
+# SAGE-DS ablation: all candidate sites with equal weight (native, no control).
+default_score: msp
+method:
+  score: msp
+  topology: all_equal
+  safety: false
+  utility: false
+  supervision_scale: 1.0
+  use_risk_head: false
+citation: SAGE-DS all-sites-equal-weight baseline (native, unprojected)

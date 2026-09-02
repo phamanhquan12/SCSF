@@ -1,0 +1,10 @@
+# SAGE-DS ablation: dense learned per-site weights, no sparsity, no utility.
+default_score: msp
+method:
+  score: msp
+  topology: learned_dense
+  safety: false
+  utility: false
+  supervision_scale: 1.0
+  use_risk_head: false
+citation: SAGE-DS learned dense weights without sparsity or selective utility
