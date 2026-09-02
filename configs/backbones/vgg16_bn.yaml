@@ -1,0 +1,7 @@
+backbones:
+  vgg16_bn:
+    input_size: 32
+taps:
+  top_l1: pool5
+  top_l2: pool4
+# CIFAR VGG16-BN matches the Deep Gamblers / SCSF / CCL-SC compact head exactly.

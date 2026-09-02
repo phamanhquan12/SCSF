@@ -1,0 +1,10 @@
+torchvision notice
+==================
+
+This project uses torchvision (https://github.com/pytorch/vision) for datasets
+and model definitions. torchvision is licensed under the BSD 3-Clause license;
+see the upstream repository for the full text of that license.
+
+No code from torchvision is vendored: it is imported at runtime. The CIFAR
+dataset wrapper adds our own deterministic global split logic on top of the
+standard torchvision dataset API.

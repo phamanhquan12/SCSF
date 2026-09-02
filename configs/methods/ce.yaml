@@ -1,0 +1,4 @@
+default_score: msp
+method:
+  score: msp
+citation: plain cross-entropy baseline

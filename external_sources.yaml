@@ -1,0 +1,53 @@
+# External sources used by the scsf harness.
+#
+# Every method port records its provenance here; license texts for the MIT/
+# BSD notices live in external_licenses/. Papers are cited bibliographically;
+# URLs are given only where they are stable, well-known, or referenced in the
+# ported code itself (do not add guessed URLs).
+
+packages:
+  - name: deep-gamblers
+    method: dg
+    paper: "“Deep Gamblers: Learning to Abstain with Portfolio Theory”, Ziyin, Wang, Liang, Salakhutdinov, NeurIPS 2019."
+    license: attributable per paper; reserve-neuron formulation re-implemented here.
+    adaptations: "C+1 reservation neuron, reward 2.2 (paper default); CE + -reward*log(p_res) loss."
+
+  - name: selectivenet
+    method: selectivenet
+    paper: "“SelectiveNet: A Deep Neural Network with an Integrated Reject Option”, Geifman & El-Yaniv, ICML 2019."
+    reference_impl: https://github.com/gatheluck/SelectiveNet
+    license: MIT
+    adaptations: "Closed-form L = a·(CE_sel + l·Pcov) + (1-a)·CE_aux with alpha=0.5, lm=32.0 (official default)."
+
+  - name: self-adaptive-training
+    method: sat
+    paper: "“Self-Adaptive training: Bridging Supervised and Self-Supervised Learning”, Huang et al., NeurIPS 2021."
+    ported_from: "official SAT-selective-cls/loss.py (MIT)"
+    license: MIT
+    adaptations: "Class-local momentum history keyed by global official-fold index; inference score 1 - p(reject)."
+
+  - name: ccl-sc
+    method: ccl_sc
+    paper: "“Confidence-aware Contrastive Learning for Selective Classification”, Wang et al., ICML 2024."
+    reference_impl: https://github.com/lamda-bbo/CCL-SC
+    license: MIT
+    adaptations:
+      - "Uploaded code only fills queues inside an impossible full_k1 & full_k2 gate; queues are now filled from the first epoch >= pretrain batch and the loss activates once both are full (paper behavior)."
+      - "Official CSC.MoCo(dim=128,...) is inconsistent with the 512-d features it is handed; dim = backbone.final_dim."
+
+  - name: scsf-method
+    method: scsf
+    provenance: "this repository (fork of the SCSF repo; gradient-routing audit documented in docs/scsf-gradient-semantics.md)."
+    license: MIT
+
+  - name: torchvision
+    used_by: data/ and backbones/
+    reference_impl: https://github.com/pytorch/vision
+    license: BSD-3-Clause
+    notice: "torchvision notice retained under external_licenses/torchvision.NOTICE."
+
+notices:
+  - external_licenses/selectivenet.LICENSE
+  - external_licenses/self-adaptive-training.LICENSE
+  - external_licenses/ccl-sc.LICENSE
+  - external_licenses/torchvision.NOTICE

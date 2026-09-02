@@ -1,0 +1,46 @@
+# Frozen per-cell transfer schedules: CNNs get SGD+cosine, ViT/ConvNeXt-style
+# models get AdamW with linear warmup (first 5 epochs, implemented in evaluator
+# manifests only; the scheduler is cosine over the full run).
+train:
+  epochs: 200
+  batch_size: 128
+  optimizer: sgd
+  scheduler: cosine
+  lr: 0.1
+  momentum: 0.9
+  weight_decay: 0.0005
+  eval_every: 1
+  save_every: 5
+  guard_delta_acc: 1.0
+by_backbone:
+  resnet18:
+    optimizer: sgd
+    lr: 0.1
+    momentum: 0.9
+    weight_decay: 0.0005
+    scheduler: cosine
+  wideresnet28_10:
+    optimizer: sgd
+    lr: 0.1
+    momentum: 0.9
+    weight_decay: 0.0005
+    scheduler: cosine
+  vgg16_bn:
+    optimizer: sgd
+    lr: 0.1
+    momentum: 0.9
+    weight_decay: 0.0005
+    scheduler: cosine
+    epochs: 300
+  convnext_tiny:
+    optimizer: adamw
+    lr: 0.001
+    momentum: 0.9
+    weight_decay: 0.05
+    scheduler: cosine
+  deit_s:
+    optimizer: adamw
+    lr: 0.001
+    momentum: 0.9
+    weight_decay: 0.05
+    scheduler: cosine

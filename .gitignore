@@ -21,6 +21,9 @@ dogs-vs-cats/
 *.tmp
 *.log
 
+# Runtime output trees (derived data, regenerated deterministically)
+results/
+
 # Python
 *.egg-info/
 dist/

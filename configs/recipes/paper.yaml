@@ -1,0 +1,27 @@
+# Paper track: per-paper reproduction schedules (VGG/SCSF 300-epoch step-ish).
+train:
+  epochs: 300
+  batch_size: 128
+  optimizer: sgd
+  scheduler: step
+  lr: 0.1
+  momentum: 0.9
+  weight_decay: 0.0005
+  milestones: [25, 60, 100, 150, 200, 250, 275]
+  gamma: 0.5
+  eval_every: 1
+  save_every: 5
+  guard_delta_acc: 1.0
+methods:
+  scsf:
+    pretrain: 100
+  ccl_sc:
+    pretrain: 150
+    queue_size: 3000
+    temperature: 0.1
+    memo_m: 0.999
+  dg:
+    reward: 2.2
+  sat: {}
+  selectivenet: {}
+  ce: {}

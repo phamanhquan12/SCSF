@@ -1,0 +1,13 @@
+# Default single-run recipe: the method config governs, 200 epochs cosine SGD.
+train:
+  epochs: 200
+  batch_size: 128
+  optimizer: sgd
+  scheduler: cosine
+  lr: 0.1
+  momentum: 0.9
+  weight_decay: 0.0005
+  seed: 13
+  eval_every: 1
+  save_every: 5
+  guard_delta_acc: 1.0

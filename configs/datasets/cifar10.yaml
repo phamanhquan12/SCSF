@@ -1,0 +1,11 @@
+data:
+  num_classes: 10
+  split_seed: 20260902
+  n_train: 45000
+  n_val: 5000
+  official_train_size: 50000
+  normalize:
+    mean: [0.4914, 0.4822, 0.4465]
+    std: [0.2470, 0.2435, 0.2616]
+  num_workers: 4
+  download: false

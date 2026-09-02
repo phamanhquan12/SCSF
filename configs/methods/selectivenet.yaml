@@ -1,0 +1,6 @@
+default_score: selection
+method:
+  score: selection
+  alpha: 0.5
+  lm: 32.0
+citation: SelectiveNet, CVPR 2019 (Geifman & El-Yaniv)

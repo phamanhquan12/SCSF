@@ -1,0 +1,6 @@
+backbones:
+  convnext_tiny:
+    input_size: 32
+taps:
+  top_l1: stage4
+  top_l2: stage3

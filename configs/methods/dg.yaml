@@ -1,0 +1,5 @@
+default_score: dg_r
+method:
+  score: dg_r
+  reward: 2.2
+citation: Deep Gamblers, ICML 2019 (Ziyin et al.)

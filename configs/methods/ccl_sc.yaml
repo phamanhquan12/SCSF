@@ -1,0 +1,10 @@
+default_score: msp
+method:
+  score: msp
+  pretrain: 0
+  queue_size: 3000
+  temperature: 0.1
+  memo_m: 0.999
+  reward: 1.0
+citation: Confidence-aware Contrastive Learning for Selective Classification, ICML 2024 (Wang et al.)
+adaptation_notes: queue-size gate bug fixed; dim = backbone.final_dim

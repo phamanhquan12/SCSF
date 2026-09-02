@@ -1,0 +1,117 @@
+"""Config resolver and run-registry contracts."""
+
+import os
+
+import pytest
+
+from scsf.engine import config
+from scsf.engine.registry import BASE_COLUMNS, append_rows, load_registry
+
+
+def test_cli_nested_overrides_and_coercion():
+    ov = config.overrides_from_cli(["dataset=cifar10", "train.epochs=200",
+                                    "method.alpha=0.5", "train.lr=0.05",
+                                    "method.queue_size=64"])
+    assert ov["dataset"] == "cifar10"
+    assert ov["train"]["epochs"] == 200
+    assert ov["method"]["queue_size"] == 64
+    assert ov["train"]["lr"] == 0.05
+
+
+def test_bad_override_rejected():
+    with pytest.raises(ValueError):
+        config.overrides_from_cli(["dataset"])
+
+
+def test_resolve_defaults_and_env_root(monkeypatch):
+    monkeypatch.setenv("SCSF_DATA_ROOT", "/tmp/scsf_data_root_check")
+    cfg = config.resolve({"dataset": "cifar10", "results_root": "/tmp/opencode/cfg_tests"})
+    assert cfg["data"]["root"] == "/tmp/scsf_data_root_check"
+    assert cfg["data"]["download"] is False          # never auto-download
+    assert cfg["data"]["use_serialized_splits"] is True
+    assert cfg["data"]["num_classes"] == 10
+    assert cfg["train"]["seed"] == 13
+    assert cfg["train"]["optimizer"] == "sgd"
+    assert cfg["train"]["scheduler"] == "cosine"
+    assert cfg["run_name"] == "cifar10-resnet18-ce-rsinglerun-s13"
+
+
+def test_resolve_method_and_backbone_layers_override():
+    cfg = config.resolve({"method_name": "scsf", "backbone": "resnet18",
+                          "method": {"mode": "e2e"}, "train": {"epochs": 30}})
+    assert cfg["method"]["mode"] == "e2e"
+    assert cfg["train"]["epochs"] == 30
+    assert cfg["backbones"]["resnet18"]["input_size"] == 32
+
+
+def test_resolve_keeps_run_name_unique_per_seed_and_score():
+    a = config.resolve({"dataset": "cifar10", "train": {"seed": 1}})
+    b = config.resolve({"dataset": "cifar10", "train": {"seed": 2}})
+    assert a["run_name"].endswith("-s1")
+    assert b["run_name"].endswith("-s2")
+    assert a["run_name"] != b["run_name"]
+
+
+def test_dotted_cli_overrides_behavior_differs_from_resolve_dict():
+    # dotted keys are a CLI-parsing artifact (overrides_from_cli); a raw dict
+    # passed to resolve must be nested, otherwise the key is taken literally.
+    cli = config.resolve(config.overrides_from_cli(["train.seed=7"]))
+    assert cli["train"]["seed"] == 7
+    literal = config.resolve({"train.seed": 7})
+    assert literal["train"]["seed"] == 13  # untouched literal key "train.seed"
+
+
+def test_vgg_backbone_dispatch_defaults():
+    cfg = config.resolve({"backbone": "vgg16_bn"})
+    assert cfg["backbones"]["vgg16_bn"]["input_size"] == 32
+
+
+# ---------------------------------------------------------------------------
+
+
+def test_registry_column_set_is_locked():
+    assert "run_dir" in BASE_COLUMNS
+    assert "split_hash" in BASE_COLUMNS
+    assert "risk_at_cov_5" in BASE_COLUMNS
+    assert "risk_at_cov_100" in BASE_COLUMNS
+    assert "checkpoint_epoch" in BASE_COLUMNS
+    assert BASE_COLUMNS.count("acc") == 1
+    # one row per (run_dir, split): no duplicate column defs
+    assert len(set(BASE_COLUMNS)) == len(BASE_COLUMNS)
+
+
+def test_registry_append_dedup_and_roundtrip(tmp_path):
+    p = os.path.join(tmp_path, "registry.csv")
+    row0 = {"run_dir": "r1", "split": "val", "acc": "0.5", "aurc": "0.4",
+            "dataset": "cifar10", "backbone": "resnet18", "method_name": "ce",
+            "score": "msp", "recipe": "singlerun", "seed": "1", "complete": "1"}
+    row1 = dict(row0, acc="0.6", aurc="0.3")
+    append_rows(p, [dict(row0, split="val")])
+    append_rows(p, [dict(row1, split="val")])   # same (run_dir, split) replaces
+    append_rows(p, [dict(row1, split="test")])  # different split appends
+    rows = load_registry(p)
+    assert len(rows) == 2
+    by_split = {r["split"]: r["acc"] for r in rows}
+    assert by_split["val"] == "0.6"
+    assert by_split["test"] == "0.6"
+
+
+def test_registry_rejects_unknown_columns():
+    import csv
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+        w = csv.writer(f)
+        w.writerow(BASE_COLUMNS + ["evil_col"])
+        w.writerow([""] * len(BASE_COLUMNS) + ["drop me"])
+        path = f.name
+    # load is lenient: the extra column comes through
+    rows = load_registry(path)
+    assert "evil_col" in rows[0]
+    # append enforces the locked column set: evil_col never reaches disk
+    append_rows(path + ".out", [{**{c: "" for c in BASE_COLUMNS},
+                                 "run_dir": "x", "split": "val"}])
+    with open(path + ".out") as f:
+        header = next(csv.reader(f))
+    assert "evil_col" not in header
+    assert set(BASE_COLUMNS).issubset(header)

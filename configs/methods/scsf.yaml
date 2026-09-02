@@ -1,0 +1,14 @@
+default_score: scsf_conf
+method:
+  score: scsf_conf
+  mode: posthoc
+  taps: [top_l2, top_l1]
+  pretrain: 0
+  init_meta_weight: 1.0
+  min_meta_weight: 0.0001
+  error_weight: 1.0
+  meta_lr: 0.0001
+  hidden_dim: 256
+  logits_only: false
+meta_lr: 0.0001
+citation: SCSF (this repo); gradient modes posthoc/e2e/legacy_partial_detach
