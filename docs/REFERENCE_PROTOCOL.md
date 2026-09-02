@@ -17,6 +17,12 @@ Appendix D of CCL-SC:
 - the official compact CIFAR VGG16-BN already implemented in this repository;
 - five seeds: 13, 17, 23, 29, 31.
 
+The common optimizer and schedule are identical for every method. Method loss
+coefficients remain part of each method definition and are fixed across both
+datasets. In particular, RiskFlow uses one conventional auxiliary scale of
+0.1 for both innovation and terminal supervision (and 0.001 for its
+decorrelation term); no dataset-specific tuning is allowed.
+
 Dataset-specific method constants also follow the paper:
 
 | Dataset | CCL-SC `(q, queue, weight, Es)` | DG `(reward, Es)` | SAT `(momentum, Es)` |

@@ -290,6 +290,9 @@ class RiskFlowMethod(Method):
         d = None
         if y is not None:
             e = (prediction != y).float().detach()
+            # This continuous difficulty target can exceed one for a
+            # confidently wrong prediction.  It is therefore supervised by
+            # robust regression below, never as a Bernoulli probability.
             d = (F.nll_loss(F.log_softmax(logits, dim=1), y, reduction="none")
                  / math.log(self.num_classes)).detach()
 
@@ -352,7 +355,7 @@ class RiskFlowMethod(Method):
         if e is not None:
             eps_hard = (e[None, :] - torch.sigmoid(s_hard[:-1])).detach()   # (L, B)
             if self.use_soft:
-                eps_soft = (d[None, :] - torch.sigmoid(s_soft[:-1])).detach()
+                eps_soft = (d[None, :] - s_soft[:-1]).detach()
 
         return RiskFlowTrace(
             self.site_names, logits, prediction,
@@ -450,8 +453,8 @@ class RiskFlowMethod(Method):
         out["rf_term_hard"] = self.term_scale * F.binary_cross_entropy_with_logits(
             flow.final_s_hard, e)
         if self.use_soft:
-            out["rf_term_soft"] = self.term_scale * F.binary_cross_entropy_with_logits(
-                flow.final_s_soft, d)
+            out["rf_term_soft"] = self.term_scale * F.huber_loss(
+                flow.final_s_soft, d, delta=self.huber_delta)
 
         if self.decorr_scale > 0 and flow.deltas is not None:
             out["rf_decorr"] = self.decorr_scale * decorrelation_penalty(flow.deltas)

@@ -87,16 +87,17 @@ For a batch with prediction `pred = argmax logits` and labels `y`:
   its feature adapter/backbone.
 * **Soft channel**: detached final difficulty target
   `d = stopgrad(NLL(logits, y) / log(C))` (normalized true-label
-  cross-entropy, in `[0, 1]` roughly), with its own pseudo-residual
-  `eps_soft_l = stopgrad(d - sigmoid(s_soft_{l-1}))` and an analogous Huber
+  cross-entropy; it can exceed one), with its own pseudo-residual
+  `eps_soft_l = stopgrad(d - s_soft_{l-1})` and an analogous Huber
   innovation loss. The soft channel is **auxiliary**: it is never the inference
   score, and `readout_soft` is excluded from deployment parameter counts.
   Both channels are logged.
-* **Terminal proper-scoring loss**: `BCE(sigmoid(s_hard_L), e)` keeps the
-  cumulative state meaningful; the soft terminal `BCE(sigmoid(s_soft_L), d)`
-  is auxiliary. (Also `cross_entropy(logits, y)` for the classifier.)
+* **Terminal losses**: `BCE(sigmoid(s_hard_L), e)` keeps the hard cumulative
+  state meaningful. The continuous soft target is not a Bernoulli target, so
+  `Huber(s_soft_L, d)` is used for its auxiliary terminal regression. (Also
+  `cross_entropy(logits, y)` for the classifier.)
 * **Innovation decorrelation penalty** (small, configurable `decorr_scale`,
-  default 0.01): the mean absolute off-diagonal entry of the per-example Gram
+  default 0.001): the mean absolute off-diagonal entry of the per-example Gram
   of L2-normalized innovation vectors, averaged over the batch. It penalizes
   redundant updates across depth and is robust to zero-variance columns (an
   `eps` floor, never a fragile scalar correlation).
@@ -104,6 +105,10 @@ For a batch with prediction `pred = argmax logits` and labels `y`:
 Inference score: `confidence = -s_hard_L` (higher cumulative risk -> lower
 confidence). The soft channel and all per-depth quantities are exported for
 analysis but are not part of the deployment head.
+
+Under the shared CIFAR reference optimizer, innovation and terminal terms use
+one dataset-independent auxiliary coefficient of 0.1. This coefficient is
+fixed for CIFAR-10 and CIFAR-100 rather than selected per dataset.
 
 ## Modes (ablation ladder / required comparisons)
 

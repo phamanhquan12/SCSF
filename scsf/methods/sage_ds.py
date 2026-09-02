@@ -183,13 +183,31 @@ class Controller(nn.Module):
 
     @torch.no_grad()
     def update_utility_ema(self, utilities: Sequence[Optional[float]]):
-        """Bias-corrected EMA (``beta``) of per-site selective utility."""
+        """Stable EMA of relative per-site selective utility.
+
+        Utility dot products can span many orders of magnitude as the
+        backbone changes scale.  The controller only consumes their relative
+        values, so normalize each observation vector before updating the raw
+        EMA.  Bias correction is applied when reading the buffer; storing the
+        corrected value back into the EMA would repeatedly divide old state
+        and eventually overflow.
+        """
+        vals = []
+        for utility in utilities:
+            cur = float(utility) if utility is not None else 0.0
+            vals.append(cur if math.isfinite(cur) else 0.0)
+        scale = max((abs(cur) for cur in vals), default=0.0)
+        if scale > 0.0:
+            vals = [cur / scale for cur in vals]
         self.ui_step += 1
-        b = 1.0 - self.beta ** float(self.ui_step)
-        for i, s in enumerate(self.site_names):
-            cur = float(utilities[i]) if utilities[i] is not None else 0.0
-            ema = self.beta * float(self.utility_ema[i]) + (1.0 - self.beta) * cur
-            self.utility_ema[i] = ema / b
+        for i, cur in enumerate(vals):
+            self.utility_ema[i].mul_(self.beta).add_((1.0 - self.beta) * cur)
+
+    def _corrected_utility(self) -> torch.Tensor:
+        step = int(self.ui_step)
+        if step <= 0:
+            return self.utility_ema
+        return self.utility_ema / (1.0 - self.beta ** step)
 
     @torch.no_grad()
     def step_from_utility(self, controller_lr: float, sparsity_cost: float, cap: float):
@@ -199,16 +217,18 @@ class Controller(nn.Module):
         dot product cannot dominate; each update is additionally clipped to
         ``[-cap, cap]`` (per-site strength cap).
         """
-        umax = float(self.utility_ema.abs().max())
+        utility = self._corrected_utility()
+        umax = float(utility.abs().max())
         for i, s in enumerate(self.site_names):
-            raw = float(self.utility_ema[i])
+            raw = float(utility[i])
             u_norm = raw / umax if umax > 1e-12 else 0.0
             delta = controller_lr * (u_norm - sparsity_cost)
             self.gates[s].log_alpha.data.add_(
                 float(torch.clamp(torch.tensor(delta), -cap, cap)))
 
     def utility_ema_dict(self) -> Dict[str, float]:
-        return {s: float(self.utility_ema[i].detach().cpu())
+        utility = self._corrected_utility()
+        return {s: float(utility[i].detach().cpu())
                 for i, s in enumerate(self.site_names)}
 
 

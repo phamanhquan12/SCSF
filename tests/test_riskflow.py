@@ -359,6 +359,24 @@ def test_riskflow_train_step_optimizes_state_stack():
     assert any("cell" in n or "readout" in n for n in moved)
 
 
+def test_riskflow_soft_nll_above_one_uses_nonnegative_regression():
+    """A confidently wrong normalized NLL is not a valid BCE target."""
+    m = _rf_method(seed=24)
+    m.train()
+    classifier = m.backbone.base_model.fc
+    with torch.no_grad():
+        classifier.weight.zero_()
+        classifier.bias.zero_()
+        classifier.bias[0] = 20.0
+    x = torch.randn(4, 3, 32, 32)
+    y = torch.ones(4, dtype=torch.long)
+    flow = m._flow(m.backbone(x), y=y)
+    assert bool(torch.all(flow.soft_target > 1.0))
+    losses = m.train_loss((x, y, torch.arange(4)), None)
+    assert torch.isfinite(losses["rf_term_soft"])
+    assert float(losses["rf_term_soft"]) >= 0.0
+
+
 # ---------------------------------------------------------------------------
 # trace export produces all required per-depth arrays
 # ---------------------------------------------------------------------------

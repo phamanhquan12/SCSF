@@ -100,6 +100,16 @@ def test_sage_ds_controller_helpful_suppresses_harmful():
     assert float(ctl.utility_ema_dict()["b"]) < 0.0
 
 
+def test_sage_ds_controller_ema_stays_finite_under_extreme_utilities():
+    ctl = Controller(["a", "b"], tau=0.3, beta=0.99)
+    for _ in range(1000):
+        ctl.update_utility_ema([1e300, -1e250])
+        ctl.step_from_utility(controller_lr=0.1, sparsity_cost=0.0, cap=0.3)
+    assert torch.isfinite(ctl.utility_ema).all()
+    assert all(math.isfinite(v) for v in ctl.utility_ema_dict().values())
+    assert float(ctl.gate_prob("a")) > float(ctl.gate_prob("b"))
+
+
 # ---------------------------------------------------------------------------
 # 3. classification-safety projection invariant: never push against g0_ema
 # ---------------------------------------------------------------------------

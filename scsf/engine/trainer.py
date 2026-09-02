@@ -242,6 +242,14 @@ class Trainer:
                 loss_dict = self.method.train_loss(
                     tuple(t.to(self.device) if torch.is_tensor(t) else t for t in batch), self
                 )
+                nonfinite = [
+                    name for name, value in loss_dict.items()
+                    if torch.is_tensor(value) and not bool(torch.isfinite(value).all())
+                ]
+                if nonfinite:
+                    raise FloatingPointError(
+                        f"non-finite loss terms at epoch={epoch}, batch={bi}: "
+                        f"{', '.join(nonfinite)}")
                 total = sum(v for v in loss_dict.values() if torch.is_tensor(v) and v.requires_grad)
                 for opt in self.optimizers:
                     opt.zero_grad(set_to_none=True)

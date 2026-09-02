@@ -11,9 +11,12 @@ method:
   state_dim: 64
   cell_hidden: 64
   token: cls
-  innov_scale: 1.0
-  term_scale: 1.0
-  decorr_scale: 0.01
+  # One dataset-independent auxiliary scale. The recurrent stack contributes
+  # four supervised terms, so 0.1 keeps it a regularizer under the shared
+  # CCL-SC SGD protocol rather than overwhelming the primary CE objective.
+  innov_scale: 0.1
+  term_scale: 0.1
+  decorr_scale: 0.001
   huber_delta: 1.0
   cat_lo: 0.3
   cat_hi: 0.7
