@@ -161,6 +161,33 @@ def parallel_scheduler(manifest: str, results_root: str, python: str,
     log_root = os.path.join(results_root, "logs")
     os.makedirs(log_root, exist_ok=True)
 
+    # Singleton lock to prevent duplicate instances
+    lock_path = os.path.join(results_root, ".scheduler.lock")
+    if os.path.exists(lock_path):
+        try:
+            old_pid = int(open(lock_path).read().strip())
+            os.kill(old_pid, 0)  # check if alive
+            print(f"ERROR: another scheduler (pid {old_pid}) is running. "
+                  f"Remove {lock_path} if stale.", flush=True)
+            sys.exit(1)
+        except (OSError, ValueError):
+            pass  # stale lock
+    with open(lock_path, "w") as f:
+        f.write(str(os.getpid()))
+
+    try:
+        return _scheduler_inner(manifest, results_root, python, registry_path,
+                                progress_path, log_root, max_jobs, max_gpu_mib,
+                                dry_run)
+    finally:
+        try:
+            os.unlink(lock_path)
+        except OSError:
+            pass
+
+
+def _scheduler_inner(manifest, results_root, python, registry_path,
+                     progress_path, log_root, max_jobs, max_gpu_mib, dry_run):
     # Initialize progress header if needed
     if not os.path.exists(progress_path) or os.path.getsize(progress_path) == 0:
         with open(progress_path, "w", newline="") as f:
