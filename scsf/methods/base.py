@@ -103,12 +103,17 @@ class Method(nn.Module):
 
     # -- optimizer / scheduler -----------------------------------------------
     def optimizer_specs(self) -> List[dict]:
-        """Return optimizer spec dicts (first spec receives the scheduler)."""
+        """Return optimizer spec dicts (first spec receives the scheduler).
+
+        Honors the configured optimizer family (``train.optimizer``) so
+        conventional AdamW recipes on transformer/ConvNeXt cells are respected
+        rather than forcing SGD on every backbone.
+        """
         t = self.cfg["train"]
         return [
             {
                 "params": self.parameters(),
-                "kind": "sgd",
+                "kind": t.get("optimizer", "sgd"),
                 "lr": float(t["lr"]),
                 "momentum": float(t["momentum"]),
                 "weight_decay": float(t["weight_decay"]),
