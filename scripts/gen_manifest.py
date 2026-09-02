@@ -191,15 +191,86 @@ def _rows():
                 pri += 1
 
 
+def _gate_rows():
+    """Unified gate manifest: VGG16-BN first (gate-critical), then ResNet-18."""
+    pri = 0
+    # Gate-critical: VGG16-BN baselines + methods, all seeds
+    for dataset in DATASETS:
+        for method, mode in BASELINES:
+            if _skip(method, "vgg16_bn"):
+                continue
+            for seed in SEEDS:
+                run_dir, args = _cli(method, mode, dataset, "vgg16_bn", seed, RECIPE, "{RR}")
+                yield (pri, "A", dataset, "vgg16_bn", method, mode or "", seed, run_dir, args)
+                pri += 1
+        for method, mode in [("sage_ds", None), ("depthfrag", None), ("riskflow", None)]:
+            for seed in SEEDS:
+                run_dir, args = _cli(method, mode, dataset, "vgg16_bn", seed, RECIPE, "{RR}")
+                yield (pri, "C", dataset, "vgg16_bn", method, mode or "", seed, run_dir, args)
+                pri += 1
+    # Historical: ResNet-18 baselines + methods, all seeds
+    for dataset in DATASETS:
+        for method, mode in BASELINES:
+            if _skip(method, "resnet18"):
+                continue
+            for seed in SEEDS:
+                run_dir, args = _cli(method, mode, dataset, "resnet18", seed, RECIPE, "{RR}")
+                yield (pri, "A", dataset, "resnet18", method, mode or "", seed, run_dir, args)
+                pri += 1
+        for method, mode in [("sage_ds", None), ("depthfrag", None), ("riskflow", None)]:
+            for seed in SEEDS:
+                run_dir, args = _cli(method, mode, dataset, "resnet18", seed, RECIPE, "{RR}")
+                yield (pri, "C", dataset, "resnet18", method, mode or "", seed, run_dir, args)
+                pri += 1
+    # Additional backbones: WRN, ConvNeXt, DeiT (all methods, all seeds)
+    for backbone in ("wideresnet28_10", "convnext_tiny", "deit_s"):
+        for dataset in DATASETS:
+            for method, mode in METHODS:
+                if _skip(method, backbone):
+                    continue
+                for seed in SEEDS:
+                    run_dir, args = _cli(method, mode, dataset, backbone, seed, RECIPE, "{RR}")
+                    yield (pri, "C", dataset, backbone, method, mode or "", seed, run_dir, args)
+                    pri += 1
+    # Ablations on cifar100/vgg16_bn
+    for dataset, backbone in (("cifar100", "vgg16_bn"),):
+        for method, mode in SAGE_DS_ABLATIONS + DEPTHFRAG_ABLATIONS + RISKFLOW_COMPARISONS:
+            for seed in B_BASELINE_SEEDS:
+                run_dir, args = _cli(method, mode, dataset, backbone, seed, RECIPE, "{RR}")
+                yield (pri, "D", dataset, backbone, method, mode or "", seed, run_dir, args)
+                pri += 1
+
+
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--results_root", default="results")
     ap.add_argument("--out_dir", default=None)
+    ap.add_argument("--gate", action="store_true",
+                    help="Generate a single gate.tsv manifest (VGG16-BN first)")
     args = ap.parse_args(argv)
     rr = args.results_root
     out_dir = args.out_dir or os.path.join(rr, "manifests")
     os.makedirs(out_dir, exist_ok=True)
     import csv
+    if args.gate:
+        rows = []
+        for row in _gate_rows():
+            run_dir, cli = row[7], row[8].replace("{RR}", rr)
+            rows.append((row[0], row[1], row[2], row[3], row[4], row[5],
+                         str(row[6]), run_dir.replace("{RR}", rr), cli))
+        path = os.path.join(out_dir, "gate.tsv")
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f, delimiter="\t", lineterminator="\n")
+            w.writerow(["priority", "stage", "dataset", "backbone", "method_name",
+                        "mode", "seed", "run_dir", "args"])
+            for r in rows:
+                w.writerow(r)
+        print(f"wrote {len(rows)} runs to {path}")
+        by_bb = {}
+        for r in rows:
+            by_bb[r[3]] = by_bb.get(r[3], 0) + 1
+        print("  by backbone: " + ", ".join(f"{k}={v}" for k, v in sorted(by_bb.items())))
+        return
     per_stage = {}
     n = 0
     for row in _rows():
