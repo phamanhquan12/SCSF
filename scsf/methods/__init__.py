@@ -9,6 +9,14 @@ from .sage_ds import (  # noqa: F401
     params_reached_by_aux,
     selective_utility,
 )
+from .depthfrag import (  # noqa: F401
+    DepthFragMethod,
+    FragHead,
+    FragProbe,
+    GradNormAccumulator,
+    params_reached_by_probes,
+    probe_gradient_report,
+)
 from .scores import (  # noqa: F401
     SCORE_FUNCS,
     compute_scores,
@@ -33,6 +41,12 @@ __all__ = [
     "params_reached_by_aux",
     "selective_utility",
     "ALL_TOPO",
+    "DepthFragMethod",
+    "FragProbe",
+    "FragHead",
+    "GradNormAccumulator",
+    "params_reached_by_probes",
+    "probe_gradient_report",
     "msp",
     "entropy",
     "negative_entropy",

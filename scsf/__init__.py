@@ -4,11 +4,14 @@ Package layout
 --------------
 scsf.data         deterministic, leakage-free CIFAR-10/CIFAR-100 contracts
 scsf.backbones    architecture-native feature-tap registry + BackboneOutput
-scsf.methods      CE, DG, SelectiveNet, SAT, SCSF (posthoc/e2e), CCL-SC
+scsf.methods      CE, DG, SelectiveNet, SAT, SCSF (posthoc/e2e), CCL-SC,
+                  SAGE-DS, DepthFrag (probe/head distillation)
 scsf.metrics      exact selective-classification metrics
 scsf.engine       trainer, evaluator, checkpointing, config, registry
 scsf.train        entrypoint: ``python -m scsf.train dataset=cifar10 ...``
 scsf.evaluate     entrypoint: ``python -m scsf.evaluate run_dir=... split=test``
+scsf.extract_depthfg entrypoint: ``python -m scsf.extract_depthfg run_dir=...
+                  split=val`` (frozen-checkpoint fragility profiles + ladder)
 scsf.aggregate    entrypoint: ``python -m scsf.aggregate results/registry.csv``
 
 Gradient semantics (README + tests for details):

@@ -18,6 +18,16 @@ with reproducible, test-locked scientific definitions.
     explicit gradient semantics (`posthoc` / `e2e` / `legacy_partial_detach`).
   * `ccl_sc` — Confidence-aware Contrastive Learning for Selective
     Classification (class-conditioned MoCo queues).
+  * `sage_ds` — SAGE-DS: depth-wise selective supervision with a controller
+    and per-site utility-EMA routing; ablated aliases `sage_ds_*`.
+  * `depthfrag` — DepthFrag: distill depth-wise decision fragility into a
+    terminal score. Signed relative fragility radii are extracted from a
+    frozen checkpoint (`python -m scsf.extract_depthfg run_dir=...`) and an
+    end-to-end method (`depthfrag.yaml`) regresses the detached targets via
+    per-site probes + a terminal head. Ablation/control aliases
+    `depthfrag_terminal_margin`, `depthfrag_terminal`,
+    `depthfrag_intermediate`, `depthfrag_raw`, `depthfrag_frozen`,
+    `depthfrag_clip`. See `docs/depthfrag.md`.
 * Backbones: ResNet-18, VGG16-BN, WideResNet-28-10, ConvNeXt-Tiny, DeiT-Small,
   with tap roles (`top_l2`, `top_l1`) for SCSF and config-driven recipes.
 * Metrics: exact selective-classification metrics (numpy only), including the
@@ -70,6 +80,9 @@ aggregation keying are all locked by tests.
 `docs/scsf-gradient-semantics.md` documents the SCSF gradient-routing audit
 (v1's `end_to_end=False` detached logits only; that bug is now the explicit,
 deprecated `legacy_partial_detach` mode).
+`docs/depthfrag.md` documents the DepthFrag fragility geometry (margin-derived
+signed relative radii), the BatchNorm fast/exact treatment, the limits of the
+linear approximation, and the deployment path (terminal head only).
 
 ## Tests
 
@@ -80,7 +93,8 @@ PYTHONPATH=. ./.venv/bin/python -m pytest tests/
 Covered: score primitives, exact selective metrics, split determinism and
 statification, config/registry contracts, and per-method scientific
 invariants (SelectiveNet loss formula, SAT history buffers, MoCo queues,
-SCSF gradient routing and meta-weight schedule).
+SCSF gradient routing and meta-weight schedule, SAGE-DS utility sign + gate
+controller, DepthFrag fragility geometry and BatchNorm coupling).
 
 ## External sources & licenses
 
@@ -96,11 +110,11 @@ scsf/
   backbones/   # models + tap probing
   data/        # cifar + deterministic serialized splits
   engine/      # config, trainer, evaluator, registry, checkpointing
-  methods/     # factory + the six methods + score primitives
+  methods/     # factory + the methods + score primitives
   metrics/     # roc helpers + selective-classification metrics
-  train.py evaluate.py aggregate.py   # CLI entrypoints
+  train.py evaluate.py aggregate.py extract_depthfg.py   # CLI entrypoints
 tests/         # pytest suite (contract + methods + engine)
-docs/          # EMPIRICAL_CONTRACT.md, scsf-gradient-semantics.md
+docs/          # EMPIRICAL_CONTRACT.md, scsf-gradient-semantics.md, depthfrag.md
 configs/       # datasets / backbones / methods / recipes
 scripts/       # runners and verification
 ```

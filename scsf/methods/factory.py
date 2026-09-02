@@ -12,6 +12,7 @@ from .sat import SATMethod
 from .scsf import SCSFMethod
 from .selectivenet import SelectiveNetMethod
 from .sage_ds import SageDSMethod
+from .depthfrag import DepthFragMethod
 
 _REGISTRY: Dict[str, Callable[..., Method]] = {}
 
@@ -48,6 +49,15 @@ for _n, _b in [
     ("sage_ds_ss0_3", SageDSMethod),
     ("sage_ds_ss1_0", SageDSMethod),
     ("sage_ds_ss3_0", SageDSMethod),
+    # DepthFrag: all aliases resolve to the same class driven by the method
+    # config (ablation ladder + frozen control + sensitivity control).
+    ("depthfrag", DepthFragMethod),
+    ("depthfrag_terminal_margin", DepthFragMethod),
+    ("depthfrag_terminal", DepthFragMethod),
+    ("depthfrag_intermediate", DepthFragMethod),
+    ("depthfrag_raw", DepthFragMethod),
+    ("depthfrag_frozen", DepthFragMethod),
+    ("depthfrag_clip", DepthFragMethod),
 ]:
     register_method(_n, _b)
 
