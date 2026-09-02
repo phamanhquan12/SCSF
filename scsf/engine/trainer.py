@@ -296,6 +296,13 @@ class Trainer:
 
 
 def _git_state():
+    # Execution mirrors intentionally omit .git.  The launcher can pin the
+    # exact authoring commit explicitly; when present it is authoritative and
+    # propagates unchanged to every train/eval subprocess.
+    frozen = os.environ.get("SCSF_SOURCE_COMMIT", "").strip()
+    if frozen:
+        dirty = os.environ.get("SCSF_SOURCE_DIRTY", "0").strip().lower()
+        return frozen, dirty in ("1", "true", "yes")
     try:
         import subprocess
         root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

@@ -6,6 +6,7 @@ import pytest
 
 from scsf.engine import config
 from scsf.engine.registry import BASE_COLUMNS, append_rows, load_registry
+from scsf.engine.trainer import _git_state
 
 
 def test_cli_nested_overrides_and_coercion():
@@ -16,6 +17,12 @@ def test_cli_nested_overrides_and_coercion():
     assert ov["train"]["epochs"] == 200
     assert ov["method"]["queue_size"] == 64
     assert ov["train"]["lr"] == 0.05
+
+
+def test_explicit_source_commit_is_authoritative(monkeypatch):
+    monkeypatch.setenv("SCSF_SOURCE_COMMIT", "734569f")
+    monkeypatch.setenv("SCSF_SOURCE_DIRTY", "0")
+    assert _git_state() == ("734569f", False)
 
 
 def test_bad_override_rejected():
