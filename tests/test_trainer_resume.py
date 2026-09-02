@@ -147,3 +147,65 @@ def test_gpu_map_location_resume_rng_state_is_copied_to_cpu():
     g2 = make_generator(13)
     restore_global_state(st, g2)  # must not raise and must stay CPU-stateful
     assert g2.get_state().clone().equal(state["generator"][0].cpu())
+
+
+def _make_tmp_trainer(tmp_path, selection):
+    """A fake Trainer exposing only the prune path (no data build)."""
+    from scsf.engine.trainer import Trainer
+
+    class _Tr(Trainer):
+        def __init__(self, run_dir, selection):
+            self.run_dir = run_dir
+            self.manager = __import__(
+                "scsf.engine.checkpoint", fromlist=["CheckpointManager"]
+            ).CheckpointManager(run_dir)
+            self.selection = selection
+
+        def _save_epoch_snapshot(self):
+            self._prune_old_epoch_snapshots()
+
+    return _Tr(str(tmp_path), selection)
+
+
+def test_epoch_snapshot_pruning_keeps_newest_and_selected():
+    """Pruning must retain only the newest epoch snapshot plus the currently
+    selected epoch snapshot, bounding on-disk checkpoint growth (a must-have
+    for the multi-GB gate matrix on a limited disk)."""
+    import tempfile
+    from scsf.engine.checkpoint import SelectionTracker, CheckpointManager
+
+    with tempfile.TemporaryDirectory() as td:
+        m = CheckpointManager(td)
+        # Save several epoch snapshots (simulating save_every=1 over epochs 0..9)
+        for e in range(10):
+            m.save(f"epoch_{e:03d}", {"e": e})
+        sel = SelectionTracker(guard_delta_acc=1.0)
+        sel.selected_epoch = 3  # simulate selection landed on epoch 3
+        t = _make_tmp_trainer(td, sel)
+        t._save_epoch_snapshot()  # prunes
+        remaining = sorted(
+            os.path.basename(p)[:-3]
+            for p in __import__("glob").glob(os.path.join(td, "epoch_*.pt"))
+        )
+        # newest (009) + selected (003) survive; all others removed
+        assert remaining == ["epoch_003", "epoch_009"], remaining
+
+
+def test_epoch_snapshot_pruning_keeps_newest_when_no_selection():
+    """When no epoch is selected yet, pruning keeps only the newest snapshot."""
+    import tempfile
+    from scsf.engine.checkpoint import SelectionTracker, CheckpointManager
+
+    with tempfile.TemporaryDirectory() as td:
+        m = CheckpointManager(td)
+        for e in range(5):
+            m.save(f"epoch_{e:03d}", {"e": e})
+        sel = SelectionTracker(guard_delta_acc=1.0)  # selected_epoch is None
+        # make .selected_epoch not None-prone: it's None initially
+        t = _make_tmp_trainer(td, sel)
+        t._save_epoch_snapshot()
+        remaining = sorted(
+            os.path.basename(p)[:-3]
+            for p in __import__("glob").glob(os.path.join(td, "epoch_*.pt"))
+        )
+        assert remaining == ["epoch_004"], remaining

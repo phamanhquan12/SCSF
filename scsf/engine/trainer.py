@@ -144,6 +144,33 @@ class Trainer:
             return
         payload = self._payload(f"epoch_{self.epoch:03d}", None)
         self.manager.save(f"epoch_{self.epoch:03d}", payload)
+        # Disk budget: keep the newest epoch snapshot (for exact resume after a
+        # crash) plus the currently-selected epoch snapshot (so the contract's
+        # selected checkpoint is always reconstructable). best/selected/last
+        # are separate single files. Everything else is pruned.
+        self._prune_old_epoch_snapshots()
+
+    def _prune_old_epoch_snapshots(self):
+        import glob
+        pat = os.path.join(self.run_dir, "epoch_*.pt")
+        tags = []
+        for p in glob.glob(pat):
+            t = os.path.basename(p)[:-3]
+            if t[6:].isdigit():
+                tags.append(t)
+        if len(tags) <= 1:
+            return
+        newest = max(tags, key=lambda t: int(t[6:]))
+        keep = {newest}
+        sel = self.selection.selected_epoch
+        if sel is not None:
+            keep.add(f"epoch_{sel:03d}")
+        for t in tags:
+            if t not in keep:
+                try:
+                    os.remove(self.manager.ckpt_path(t))
+                except OSError:
+                    pass
 
     def _manifest(self) -> dict:
         from importlib import import_module
@@ -236,7 +263,8 @@ class Trainer:
                 self._save_epoch_snapshot()
                 if changed:
                     # selection epoch == current epoch -> snapshot now; otherwise
-                    # copy from the epoch snapshot (kept on the save_every grid)
+                    # copy from the epoch snapshot (kept on the save_every grid,
+                    # and pruning preserves the selected-epoch snapshot).
                     if self.selection.selected_epoch == epoch:
                         self.manager.save("selected", self._payload("selected", val_metrics))
                     elif self.manager.exists(f"epoch_{self.selection.selected_epoch:03d}"):
