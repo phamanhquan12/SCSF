@@ -107,3 +107,22 @@ columns and a `runs` counter. Output naming defaults to
   while never back-propagating into the momentum encoder.
 * SAT momentum history is a registered buffer mixing one-hot prior and model
   soft-label, keyed by global official-fold index.
+
+## 8. VGG16-BN passing gate
+
+The first non-ResNet decision uses CIFAR-10 and CIFAR-100, VGG16-BN, the
+`backbone_transfer` recipe, and paired seeds `{13,17,23,29,31}`.  All seven
+matched baselines must be complete: CE/MSP, Deep Gamblers/`dg_r`,
+SelectiveNet/`selection`, SAT/`sat_conf`, SCSF-posthoc/`scsf_conf`,
+SCSF-e2e/`scsf_conf`, and CCL-SC/MSP.  Published CCL-SC VGG numbers are a
+sanity check, not a substitute for runs under this matched protocol.
+
+Candidate deployment scores are SAGE-DS/MSP, DepthFrag/`depthfrag`, and
+RiskFlow/`riskflow`.  A candidate passes only if its mean test AURC is lower
+than the strongest complete matched baseline on both datasets, its accuracy
+drop is at most 0.005 (0.5 percentage point) in either cell, and its mean
+accuracy drop across the two cells is at most 0.002 (0.2 percentage point).
+Paired confidence intervals are reported but are not an additional pass
+condition.  Missing seeds, mixed/missing source provenance, or an incomplete
+required baseline leave the gate unopened; `scripts/analyze_gate.py` exits 2
+in that state.

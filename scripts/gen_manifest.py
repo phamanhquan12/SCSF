@@ -73,8 +73,11 @@ SKIP_RULES = {
     "selectivenet": {"resnet18"},
     # SAT (Zhang et al. 2019): published ResNet-18 on CIFAR-10/100
     "sat": {"resnet18"},
-    # CCL-SC: published on VGG16-BN and ResNet-18 on CIFAR-10/100
-    "ccl_sc": {"resnet18", "vgg16_bn"},
+    # CCL-SC published VGG16-BN results, but it remains a required *matched*
+    # baseline for the new VGG16-BN gate.  Published numbers are only a sanity
+    # check because our split/recipe/selection protocol differs.  ResNet-18 is
+    # the sole paper-result skip.
+    "ccl_sc": {"resnet18"},
 }
 
 
@@ -241,24 +244,41 @@ def _gate_rows():
                 pri += 1
 
 
+def _ccl_vgg_supplement_rows():
+    """The ten matched CCL-SC jobs omitted by the original live VGG queue."""
+    pri = 0
+    for dataset in DATASETS:
+        for seed in SEEDS:
+            run_dir, args = _cli("ccl_sc", None, dataset, "vgg16_bn", seed,
+                                 RECIPE, "{RR}")
+            yield (pri, "A", dataset, "vgg16_bn", "ccl_sc", "", seed,
+                   run_dir, args)
+            pri += 1
+
+
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--results_root", default="results")
     ap.add_argument("--out_dir", default=None)
     ap.add_argument("--gate", action="store_true",
                     help="Generate a single gate.tsv manifest (VGG16-BN first)")
+    ap.add_argument("--ccl-vgg-supplement", action="store_true",
+                    help="Generate only the ten matched VGG16-BN CCL-SC jobs")
     args = ap.parse_args(argv)
     rr = args.results_root
     out_dir = args.out_dir or os.path.join(rr, "manifests")
     os.makedirs(out_dir, exist_ok=True)
     import csv
-    if args.gate:
+    if args.gate or args.ccl_vgg_supplement:
         rows = []
-        for row in _gate_rows():
+        source = (_ccl_vgg_supplement_rows() if args.ccl_vgg_supplement
+                  else _gate_rows())
+        for row in source:
             run_dir, cli = row[7], row[8].replace("{RR}", rr)
             rows.append((row[0], row[1], row[2], row[3], row[4], row[5],
                          str(row[6]), run_dir.replace("{RR}", rr), cli))
-        path = os.path.join(out_dir, "gate.tsv")
+        filename = "gate_vgg_ccl_sc.tsv" if args.ccl_vgg_supplement else "gate.tsv"
+        path = os.path.join(out_dir, filename)
         with open(path, "w", newline="") as f:
             w = csv.writer(f, delimiter="\t", lineterminator="\n")
             w.writerow(["priority", "stage", "dataset", "backbone", "method_name",
