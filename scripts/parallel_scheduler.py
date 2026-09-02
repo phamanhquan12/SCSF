@@ -45,6 +45,26 @@ def _training_finished(run_dir: str) -> bool:
     return os.path.exists(os.path.join(run_dir, "manifest.json"))
 
 
+def _fit_resume_ckpt(run_dir: str) -> str | None:
+    """Find the resume checkpoint, dropping any corrupt/truncated files.
+
+    A corrupt checkpoint is deleted (it can never be validly resumed) and we
+    fall back to an earlier one, or to a fresh start.
+    """
+    import torch  # noqa: PLC0415  (only needed inside job subprocess)
+    ckpt = _highest_epoch_ckpt(run_dir)
+    if ckpt is None:
+        return None
+    path = os.path.join(run_dir, ckpt + ".pt")
+    try:
+        torch.load(path, map_location="cpu", weights_only=False)
+        return ckpt
+    except Exception:
+        os.remove(path)
+        print(f"  [scheduler] dropped corrupt checkpoint {path}", flush=True)
+        return _fit_resume_ckpt(run_dir)
+
+
 def _registry_test_complete(registry_path: str, run_dir: str) -> bool:
     for r in load_registry(registry_path):
         if (r.get("run_dir") == run_dir and r.get("split") == "test"
@@ -82,11 +102,9 @@ def _job_main() -> int:
     try:
         resume_from = None
         if not _training_finished(run_dir):
-            ckpt = _highest_epoch_ckpt(run_dir)
+            ckpt = _fit_resume_ckpt(run_dir)
             if ckpt:
                 resume_from = ckpt
-            elif os.path.exists(os.path.join(run_dir, "last.pt")):
-                resume_from = "last"
         resumed = resume_from or "-"
 
         train_cmd = [python, "-m", "scsf.train"] + row["args"].split()
