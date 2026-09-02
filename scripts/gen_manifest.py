@@ -64,6 +64,24 @@ B_SCREEN_METHODS = [
 BACKBONES = ("resnet18", "vgg16_bn", "wideresnet28_10", "convnext_tiny", "deit_s")
 DATASETS = ("cifar10", "cifar100")
 
+# Skip rules: only skip if the ORIGINAL baseline paper published results for
+# that exact backbone+dataset.  When uncertain, err on the side of running.
+SKIP_RULES = {
+    # Deep Gamblers (Chen et al. 2020): published ResNet-18 on CIFAR-10/100
+    "dg": {"resnet18"},
+    # SelectiveNet (Geifman & El-Yaniv 2019): published ResNet-18 on CIFAR-10/100
+    "selectivenet": {"resnet18"},
+    # SAT (Zhang et al. 2019): published ResNet-18 on CIFAR-10/100
+    "sat": {"resnet18"},
+    # CCL-SC: published on VGG16-BN and ResNet-18 on CIFAR-10/100
+    "ccl_sc": {"resnet18", "vgg16_bn"},
+}
+
+
+def _skip(method: str, backbone: str) -> bool:
+    """Return True if this baseline should be skipped for this backbone."""
+    return backbone in SKIP_RULES.get(method, set())
+
 # Stage D methods per the contract section 8 (each method's own ablation
 # ladder), run on the two ablation cells.
 SAGE_DS_ABLATIONS = [
@@ -126,9 +144,12 @@ def _cli(method: str, mode, dataset: str, backbone: str, seed: int, recipe: str,
 def _rows():
     pri = 0
     # Stage A: baselines on the two stage-A backbones, all five seeds.
+    # Apply skip rules: only skip if the original paper published on that backbone.
     for dataset in DATASETS:
         for backbone in ("resnet18", "vgg16_bn"):
             for method, mode in BASELINES:
+                if _skip(method, backbone):
+                    continue
                 for seed in SEEDS:
                     run_dir, args = _cli(method, mode, dataset, backbone, seed, RECIPE, "{RR}")
                     yield (pri, "A", dataset, backbone, method, mode or "", seed, run_dir, args)
@@ -141,9 +162,12 @@ def _rows():
                 yield (pri, "B", cell[0], cell[1], method, mode or "", seed, run_dir, args)
                 pri += 1
     # Stage C: full dataset x backbone x method x seed matrix.
+    # Apply skip rules per backbone.
     for dataset in DATASETS:
         for backbone in BACKBONES:
             for method, mode in METHODS:
+                if _skip(method, backbone):
+                    continue
                 for seed in SEEDS:
                     run_dir, args = _cli(method, mode, dataset, backbone, seed, RECIPE, "{RR}")
                     yield (pri, "C", dataset, backbone, method, mode or "", seed, run_dir, args)
@@ -159,6 +183,8 @@ def _rows():
     # Paper-track reproduction sanity check: SCSF/CCL-SC on VGG16-BN (all seeds).
     for dataset in DATASETS:
         for method, mode in BASELINES:
+            if _skip(method, "vgg16_bn"):
+                continue
             for seed in SEEDS:
                 run_dir, args = _cli(method, mode, dataset, "vgg16_bn", seed, "paper", "{RR}")
                 yield (pri, "P", dataset, "vgg16_bn", method, mode or "", seed, run_dir, args)
