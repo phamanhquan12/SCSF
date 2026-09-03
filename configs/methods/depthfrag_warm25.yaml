@@ -1,0 +1,29 @@
+# DepthFrag with 25-epoch warmup: backbone receives CE-only gradients during
+# epochs 0-24; probes/head learn from detached features. From epoch 25 onward,
+# standard end-to-end DepthFrag (probe_scale=1.0, head_scale=1.0). No reset
+# of backbone, probes, optimizer, or scheduler at the boundary.
+default_score: depthfrag
+method:
+  score: depthfrag
+  p: 2
+  q: 2
+  eps: 1e-12
+  bn_mode: eval_targets
+  token: cls
+  probe_sites: all
+  terminal_site: top_l1
+  agg: soft_min
+  agg_tau: 2.0
+  cvar_frac: 0.25
+  target: signed_log1p
+  clip_cap: 1.0
+  probe_hidden: 32
+  probe_scale: 1.0
+  head_scale: 1.0
+  huber_delta: 1.0
+  use_probes: true
+  use_head: true
+  freeze_backbone: false
+  target_interval: 1
+  warmup_epochs: 25
+citation: DepthFrag warm25 — 25-epoch CE-only backbone warmup, then e2e distillation

@@ -161,6 +161,7 @@ class DepthFragMethod(Method):
         self.use_head = bool(m.get("use_head", True))
         self.freeze_backbone = bool(m.get("freeze_backbone", False))
         self.target_interval = int(m.get("target_interval", 1))
+        self.warmup_epochs = int(m.get("warmup_epochs", 0))
 
         role_pr = m.get("probe_sites", "all")
         if role_pr == "all":
@@ -269,6 +270,8 @@ class DepthFragMethod(Method):
         y = batch[1].to(device)
 
         step = int(getattr(state, "batch_index", 0))
+        epoch = int(getattr(state, "epoch", 0))
+        in_warmup = self.warmup_epochs > 0 and epoch < self.warmup_epochs
         # `target_interval` semantics (documented): every K-th step recomputes
         # the eval-forward targets and runs the probe/head supervision; the
         # in-between steps train CE only. Targets are per-example, so a
@@ -302,6 +305,8 @@ class DepthFragMethod(Method):
             pred_columns = []
             for s in self.site_names:
                 feat = pool_tap(bo.features[s], self.token)
+                if in_warmup:
+                    feat = feat.detach()
                 q = self.probes[s](feat)
                 pred_columns.append(q)
                 pl = pl + F.huber_loss(q, targets[s].detach(), delta=self.huber_delta)
@@ -318,8 +323,11 @@ class DepthFragMethod(Method):
                                      delta=self.huber_delta))
 
         if self.use_head:
+            head_input = bo.final_embedding
+            if in_warmup:
+                head_input = head_input.detach()
             out["depthfrag_head"] = self.head_scale * F.huber_loss(
-                self.head(bo.final_embedding), agg_target.detach(),
+                self.head(head_input), agg_target.detach(),
                 delta=self.huber_delta)
             self._step_head += 1.0
         self._step_n += 1
@@ -379,6 +387,7 @@ class DepthFragMethod(Method):
     # ------------------------------------------------------------------ logs
     def on_epoch_end(self, epoch: int, val_metrics: dict):
         n = max(self._step_n, 1)
+        in_warmup = self.warmup_epochs > 0 and epoch < self.warmup_epochs
         row = {
             "epoch": int(epoch),
             "target_ms": float(self._target_ms),
@@ -386,6 +395,8 @@ class DepthFragMethod(Method):
             "agg_target": float(self._step_agg_t / n),
             "agg_pred": float(self._step_agg_p / n),
             "gradnorm": self._gn.summary(),
+            "warmup": in_warmup,
+            "aux_grads_to_backbone": not in_warmup,
         }
         for s in self.site_names:
             row[f"probe_huber_{s}"] = float(self._step_probe[s] / n)
