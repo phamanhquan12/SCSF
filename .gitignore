@@ -1,5 +1,6 @@
-# Data directories
-data/
+# Repository-level dataset directory only. NOTE: must be anchored to the repo
+# root (/data/) so the source package scsf/data/ is NOT ignored.
+/data/
 save/
 __pycache__/
 *.pyc
