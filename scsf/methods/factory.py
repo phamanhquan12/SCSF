@@ -59,6 +59,7 @@ for _n, _b in [
     ("depthfrag_raw", DepthFragMethod),
     ("depthfrag_frozen", DepthFragMethod),
     ("depthfrag_clip", DepthFragMethod),
+    ("depthfrag_warm25", DepthFragMethod),
     # RiskFlow: a single class driven by the mode config (ablation ladder +
     # frozen control + hard-channel-only control).
     ("riskflow", RiskFlowMethod),

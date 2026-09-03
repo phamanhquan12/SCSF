@@ -396,7 +396,7 @@ class DepthFragMethod(Method):
             "agg_pred": float(self._step_agg_p / n),
             "gradnorm": self._gn.summary(),
             "warmup": in_warmup,
-            "aux_grads_to_backbone": not in_warmup,
+            "aux_grads_to_backbone": not in_warmup and not self.freeze_backbone,
         }
         for s in self.site_names:
             row[f"probe_huber_{s}"] = float(self._step_probe[s] / n)
