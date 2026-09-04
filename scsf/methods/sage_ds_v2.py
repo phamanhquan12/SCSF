@@ -221,6 +221,8 @@ class SageDSV2Method(SageDSMethod):
             out[f"align_before_{s}"] = float(align_before)
             out[f"align_after_{s}"] = float(align_after)
 
+        g0_norm2 = float(torch.dot(g0_flat, g0_flat).item())
+        out["g0_norm2"] = g0_norm2
         mean_before = float(sum(out[f"align_before_{s}"] for s in self.site_names)
                             / max(len(self.site_names), 1))
         mean_after = float(sum(out[f"align_after_{s}"] for s in self.site_names)

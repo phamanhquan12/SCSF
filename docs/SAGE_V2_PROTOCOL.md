@@ -141,8 +141,10 @@ side; the row is therefore self-certifying for the disjointness guarantee.
    site gradient (equivalently `tilde_g_l`) is scaled by any `c > 0`; `U_raw`
    scales by `c`; `project_aux(c * g_l, g0) = c * project_aux(g_l, g0)`.
 3. **Per-site CE-safety inequality.** For every site `l`:
-   `<tilde_g_l, g0_train> >= -tol` (and a fully conflicting gradient is reduced
-   to the epsilon-blocking residue).
+   `<tilde_g_l, g0_train> >= -tol`, where the tolerance is the exact
+   epsilon-blocking residue `align_after = align_before * eps /
+   (||g0_train||^2 + eps)` (locked exactly from the logged `g0_norm2`;
+   numerically `<tilde_g_l, g0_train> >= -1e-2` absolute).
 4. **Applied gradient identity.** The gradient of the routed scalar equals
    `g0_train + sum_l (z_l * s) * tilde_g_l` on backbone parameters and the raw
    CE gradients on auxiliary heads (audit dict compared against

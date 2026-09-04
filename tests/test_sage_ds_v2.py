@@ -147,7 +147,17 @@ def test_sage_ds_v2_per_site_ce_safety_inequality():
     for s in m.site_names:
         before = float(loss_dict[f"align_before_{s}"])
         after = float(loss_dict[f"align_after_{s}"])
-        assert after >= -1e-4, (s, before, after)
+        g0n2 = float(loss_dict["g0_norm2"])
+        # projection identity in real arithmetic: a conflicted direction is
+        # reduced to the epsilon-blocking residue, exactly
+        #   align_after = align_before * eps / (||g0_train||^2 + eps)
+        # (and align_after == align_before when there is no conflict).
+        expected = (before * m.eps / (g0n2 + m.eps) if before < 0.0 else before)
+        assert abs(after - expected) <= 1e-5 * max(abs(before), 1.0), \
+            (s, before, after, g0n2)
+        # CE-safety: alignment with the training CE gradient is ~0 after the
+        # per-site projection (epsilon-blocking residue is << any gate signal).
+        assert after >= -1e-2, (s, before, after)
         # a conflict must have been removed (after ~= 0 whenever before < 0)
         if before < 0.0:
             assert abs(after) < 1e-2, (s, before, after)
