@@ -25,4 +25,4 @@ method:
   strength_cap: 0.5
   projection_eps: 1e-8
   use_risk_head: false
-citation: SAGE-V2 (bilevel utility: train-side aux gradient + disjoint meta selective gradient + per-site CE-safety projection + U_cos-controlled gates); protocol in docs/SAGE_V2_PROTOCOL.md
+citation: "SAGE-V2 (bilevel utility: train-side aux gradient + disjoint meta selective gradient + per-site CE-safety projection + U_cos-controlled gates); protocol in docs/SAGE_V2_PROTOCOL.md"
