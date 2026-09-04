@@ -1,0 +1,28 @@
+# SAGE-V2 (bilevel-utility gated selective supervision).
+#
+# Identity: same sparse hard-concrete gates, aux heads, and MSP-only inference
+# as sage_ds (v1).  Differences are preregistered in docs/SAGE_V2_PROTOCOL.md:
+#   * per-site utility is bilevel: train-side aux gradient (this batch's CE
+#     gradient is the safety reference), graded by the selective surrogate
+#     gradient on a DISJOINT held-out meta batch;
+#   * per-site CE-safety projection against the SAME-batch g0_train
+#     (tilde_g_l = g_l - min(0, <g_l, g0>)/(||g0||^2 + eps) g0);
+#   * the controller consumes the cosine utility U_cos (U_raw is retained in
+#     the per-estimate telemetry);
+#   * needs_indices = True so train/meta batches are provably disjoint.
+default_score: msp
+method:
+  score: msp
+  topology: sparse_utility_safe
+  safety: true
+  utility: true
+  sparsity_cost: 0.5
+  supervision_scale: 1.0
+  utility_interval: 50
+  controller_lr: 0.05
+  utility_ema_beta: 0.99
+  hard_concrete_tau: 0.3
+  strength_cap: 0.5
+  projection_eps: 1e-8
+  use_risk_head: false
+citation: SAGE-V2 (bilevel utility: train-side aux gradient + disjoint meta selective gradient + per-site CE-safety projection + U_cos-controlled gates); protocol in docs/SAGE_V2_PROTOCOL.md

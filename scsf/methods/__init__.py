@@ -9,6 +9,12 @@ from .sage_ds import (  # noqa: F401
     params_reached_by_aux,
     selective_utility,
 )
+from .sage_ds_v2 import (  # noqa: F401
+    SageDSV2Method,
+    bilevel_utilities,
+    cosine_utility,
+    support_fraction,
+)
 from .depthfrag import (  # noqa: F401
     DepthFragMethod,
     FragHead,
@@ -43,6 +49,10 @@ __all__ = [
     "register_method",
     "method_names",
     "SageDSMethod",
+    "SageDSV2Method",
+    "bilevel_utilities",
+    "cosine_utility",
+    "support_fraction",
     "HardConcreteGate",
     "Controller",
     "project_aux",

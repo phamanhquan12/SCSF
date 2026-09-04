@@ -12,6 +12,7 @@ from .sat import SATMethod
 from .scsf import SCSFMethod
 from .selectivenet import SelectiveNetMethod
 from .sage_ds import SageDSMethod
+from .sage_ds_v2 import SageDSV2Method
 from .depthfrag import DepthFragMethod
 from .riskflow import RiskFlowMethod
 
@@ -50,6 +51,9 @@ for _n, _b in [
     ("sage_ds_ss0_3", SageDSMethod),
     ("sage_ds_ss1_0", SageDSMethod),
     ("sage_ds_ss3_0", SageDSMethod),
+    # SAGE-V2: distinct class, bilevel-utility + per-site CE-safe projection.
+    # Separate alias; sage_ds (v1) is preserved unchanged (protocol doc).
+    ("sage_ds_v2", SageDSV2Method),
     # DepthFrag: all aliases resolve to the same class driven by the method
     # config (ablation ladder + frozen control + sensitivity control).
     ("depthfrag", DepthFragMethod),
