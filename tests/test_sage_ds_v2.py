@@ -175,15 +175,21 @@ def test_sage_ds_v2_applied_gradient_equals_ce_plus_weighted_projected_sites():
     for i, (gb, g0p, add) in enumerate(zip(g_back, audit["g0"], audit["add"])):
         assert torch.allclose(gb, g0p + add, atol=1e-6), i
 
-    # per-param per-site reconstruction of the auxiliary part
+    # per-param per-site reconstruction of the auxiliary part: each param's
+    # segment is its flat offset within every site's concatenated gradient
+    # (the offset accumulates across params, not across sites).
+    offsets = []
+    off = 0
+    for p in params:
+        offsets.append(off)
+        off += p.numel()
     for i, p in enumerate(params):
-        acc = 0
+        n = p.numel()
         expected_add = torch.zeros_like(p)
         for s in m.site_names:
-            n = p.numel()
             expected_add += (audit["z"][s] * audit["scale"]
-                             * audit["tilde"][s][acc:acc + n].reshape_as(p))
-            acc += n
+                             * audit["tilde"][s][offsets[i]:offsets[i] + n]
+                             .reshape_as(p))
         assert torch.allclose(audit["add"][i], expected_add, atol=1e-6), i
 
     # auxiliary-head parameters receive the raw (unweighted) own-CE gradient
