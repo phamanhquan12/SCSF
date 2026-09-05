@@ -158,6 +158,20 @@ worst-class regression; controller regimes "all-supervision-off late" on
 CIFAR-10 vs "pool2-only" on CIFAR-100 — i.e. whether learned supervision is
 transient rather than persistent).
 
+## 8b. Execution notes (2026-09-05)
+
+- The confirmation queue initially ran serially (`scripts/scheduler.py`, one
+  GPU process). The training step is latency/Python-bound (a 4090 sat at ~25%
+  util, one process pinned at 100% CPU), so execution switched to
+  `scripts/confirm_parallel.py`:  **up to 4 `scsf.train` processes share the
+  GPU concurrently** (each its own seed/RNG → per-run results bit-identical to
+  serial; total throughput ~2.4 epoch/min vs ~1.0 serial, GPU now ~99%).
+  Evaluation (val + test) is strictly **serial** in a second phase because
+  `registry.append_rows` rewrites `registry.csv` without a lock.
+- Run 1 (cifar10-s17) was interrupted at epoch 174 and resumed from
+  `epoch_174.pt`; the frozen `SCSF_SOURCE_COMMIT=9649eea` and per-run config
+  hashes are unchanged by this launcher change (launcher = infra, not ML code).
+
 ## 8. Preservation
 
 - Archive on the server: confirmation manifest, registry, progress log,
