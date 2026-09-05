@@ -1,0 +1,2 @@
+run,n,acc,err,aurc,auroc_error,aupr_error,excess_aurc,mean_class_aurc,worst_class_aurc,worst_class
+cifar100-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13,10000,0.7356,0.2644,0.07639857892964498,0.873162398330343,0.6793483704054067,0.03786515861645693,0.10906514368173907,0.5764156994739558,35

@@ -1,0 +1,6 @@
+run,name,acc,aurc,mean_class_aurc,worst_class_aurc,worst_class,note
+v1,cifar100-vgg16_bn-sage_ds-rccl_sc_reference-s13,0.7293,0.0802016125927371,0.11174504652111505,0.3985457370939145,73,
+v2,cifar100-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13,0.7356,0.07639857892964498,0.10906514368173907,0.5764156994739558,35,
+v2@v1-worst,,0.48,0.3933199152516561,nan,nan,73,v2 value at v1 worst class (v1=0.3985)
+v1@v2-worst,,0.55,0.39611838662337695,nan,nan,35,v1 value at v2 worst class (v2=0.5764)
+,,nan,nan,nan,nan,-1,delta(v2-v1) n=100 median=-0.0034 q25=-0.0110 q75=0.0075 p90=0.0231 p95=0.0340 max=0.1803 n_worse=44 n_worse_gt0.05=5

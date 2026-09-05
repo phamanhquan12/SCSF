@@ -1,0 +1,57 @@
+# SCSF SAGE-v2 preservation manifest (SHA256)  generated: 2026-09-05T11:20:07Z
+# host: Linux 529e79044f1c 5.15.0-190-generic #200-Ubuntu SMP Fri Aug 7 15:06:04 UTC 2026 x86_64 GNU/Linux
+# v1 frozen tree: /root/scsf (commit 0fda4f8, NOT altered)
+# v2 mirror:      /root/scsf_v2 (commit 9649eea)
+
+== seed-13 v2 runs (exploratory, commit 9649eea) ==
+fbf581b2c8b2bd229bce018f245d130853facbf3324d1a7c9f1e3fd0b97bad06  /root/scsf_v2_results/cifar10-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13/best.pt
+febb30740ff52490c52f098db9913aeefc237f13ec3c3b2abb4f903a796f35de  /root/scsf_v2_results/cifar10-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13/cfg.json
+11dd8f365c1f67fa003961e351e816be1afb5bbad5365957f7cf09f5df82edf2  /root/scsf_v2_results/cifar10-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13/epoch_224.pt
+bc6ca02dda11f0a0fdbc080b531858a6c7acae39f8eea068fe95f0dadf84730a  /root/scsf_v2_results/cifar10-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13/epoch_299.pt
+bc6297205624c5c0caeba3e5eb69f616892f793e3c8518adee2db09f7feeacb8  /root/scsf_v2_results/cifar10-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13/eval_test.json
+403acd82900ce6b5df4e64623a9567f222e7d9a7b8ece0c518ddcf4bc5b7d8cc  /root/scsf_v2_results/cifar10-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13/eval_val.json
+1ddabe1b2ae6c52b7e09360e77900dde676bf8aa0806aeccd83e84a23bcecd64  /root/scsf_v2_results/cifar10-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13/last.pt
+6906404c0765975c39d1eafd4cfa9db2b668912f40959501dc5c789bf39e338a  /root/scsf_v2_results/cifar10-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13/manifest.json
+3bb21f4c3c1cea1cdb543e57f729d7bcfa5e673a565aa20ab183a359537f17df  /root/scsf_v2_results/cifar10-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13/sage_ds_v2.jsonl
+17088a8857e11316513cb33555e940ee9340e72ab3b7bd668609888d9b568983  /root/scsf_v2_results/cifar10-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13/sage_ds_v2_utility.jsonl
+e3ef3bd7002359129b5e5169d568b1f2811a4b710974b1b20136c8e292bdd22d  /root/scsf_v2_results/cifar10-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13/selected.pt
+5eab59f41d1d21f787f7d4d1342bda9923223d66fa9b46b884896037af4b45a1  /root/scsf_v2_results/cifar100-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13/best.pt
+dd6dab806d7c6582fa6ade6355fccb81d9b9d6f97f96e1396ddc7557e5200ac4  /root/scsf_v2_results/cifar100-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13/cfg.json
+e125442833c7455b8fbef31b7ebf5eb905ba6263216781e5c8444551c5f7db4a  /root/scsf_v2_results/cifar100-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13/epoch_279.pt
+e7e1a6c7a85ca7ab8857bc0a7253e5193235cfd49ae5ea94b6fede188e2feb75  /root/scsf_v2_results/cifar100-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13/epoch_299.pt
+318ef1e65acc0f77a5b303511dfaf60567f681449235a5785efe47a4968d8369  /root/scsf_v2_results/cifar100-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13/eval_test.json
+0a488d0560de7305212e7374be610eb59c6d2b650a9ed5faf971a617fb585b15  /root/scsf_v2_results/cifar100-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13/eval_val.json
+cb1c9a22f84a3532cf765c39894f5b306ca0ffcf329e59282d6735127038ffbd  /root/scsf_v2_results/cifar100-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13/last.pt
+55d5e630a2df7ebac98243b9a81f65e934e260a7448984582965f27684081614  /root/scsf_v2_results/cifar100-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13/manifest.json
+8db6d03023d5cb902e8b79795dc9ceb22a6e72c64adfda3c235cfc0d68a8747a  /root/scsf_v2_results/cifar100-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13/sage_ds_v2.jsonl
+c3e19101c62c0b89a330de7f0f9051ca94bd00d45417fa137080b8d74af6f91f  /root/scsf_v2_results/cifar100-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13/sage_ds_v2_utility.jsonl
+65905f729d56917f892bdc8ea17d4fa40e9943d13f0d6e0b62254f6140696462  /root/scsf_v2_results/cifar100-vgg16_bn-sage_ds_v2-rccl_sc_reference-s13/selected.pt
+
+== frozen v1 seed-13 baselines (read-only) ==
+5506c57fa18d2fb868c738e667fb93911e19a0dff8e06daae85c337aecfca91e  /root/scsf/results/cifar10-vgg16_bn-sage_ds-rccl_sc_reference-s13/best.pt
+3ca87e72fd5e5ab9d31e4e17acbecbfb024a80d32730754d2a8a19c17eb2930c  /root/scsf/results/cifar10-vgg16_bn-sage_ds-rccl_sc_reference-s13/cfg.json
+5babb44b38c737e030248eb002ea45a8e4a5e376200cd4aa70ac3644930cab09  /root/scsf/results/cifar10-vgg16_bn-sage_ds-rccl_sc_reference-s13/epoch_299.pt
+65a331abf68f3817d9e6b96225c9fcb6a5e8dba633ff5a051698b31e5a659aef  /root/scsf/results/cifar10-vgg16_bn-sage_ds-rccl_sc_reference-s13/eval_test.json
+d57b83d39386bc3aa9069bf864c0160ef41e248be28e9e26bca622b83972ddb0  /root/scsf/results/cifar10-vgg16_bn-sage_ds-rccl_sc_reference-s13/eval_val.json
+26dfc8883618c98483e78f59f4c11829ba860039cb611ec789723734cf7eee9c  /root/scsf/results/cifar10-vgg16_bn-sage_ds-rccl_sc_reference-s13/last.pt
+5d05313491bd8eba53a99fc63cc5ca6af02fb5c22716f6010b57386e4b209d89  /root/scsf/results/cifar10-vgg16_bn-sage_ds-rccl_sc_reference-s13/manifest.json
+b624ecff46d8a17b6a3db9f90077bc5a1b5c9d0c4a4d48174378db02498f3c54  /root/scsf/results/cifar10-vgg16_bn-sage_ds-rccl_sc_reference-s13/sage_ds.jsonl
+be9b88faf3bb09b2d8ae0c40b57d3bc15645be0fcf760aabd4f0e4eae286a3a9  /root/scsf/results/cifar10-vgg16_bn-sage_ds-rccl_sc_reference-s13/selected.pt
+01e6452e6d76f2470e9602e5bcc14e684e8c99838ed934a7adb795afc71e62d3  /root/scsf/results/cifar100-vgg16_bn-sage_ds-rccl_sc_reference-s13/best.pt
+c5c86a9f1708a5cf2830802799088d6660adffab76c6e2bec387d104bc2ea0f9  /root/scsf/results/cifar100-vgg16_bn-sage_ds-rccl_sc_reference-s13/cfg.json
+88fa241633ede9aff63e692cd6d8cc8899db1df1b431627c8133d3324d1f48a8  /root/scsf/results/cifar100-vgg16_bn-sage_ds-rccl_sc_reference-s13/epoch_299.pt
+b85815c745acc0862be31d7902d6ad8f5ffddd4c2e8787519b2813bcb963f8fc  /root/scsf/results/cifar100-vgg16_bn-sage_ds-rccl_sc_reference-s13/eval_test.json
+aee0da08ca94748e5b8c8d18be120b0329dd966a9dd9d181c5bbb94cb974f3e5  /root/scsf/results/cifar100-vgg16_bn-sage_ds-rccl_sc_reference-s13/eval_val.json
+11373bdca6534d6bd32dd373d45db6e245d4a6c97738c30136cc7ba54bd1449e  /root/scsf/results/cifar100-vgg16_bn-sage_ds-rccl_sc_reference-s13/last.pt
+5ab2d93d46c33c311ccd2ba2b2be7ec92cde33216f996ce7323ff1f5d77886d0  /root/scsf/results/cifar100-vgg16_bn-sage_ds-rccl_sc_reference-s13/manifest.json
+33715603a96a2cc6766f1e85f0d1ef91d1fa436a7586d4b4ee9bc772d360f6fe  /root/scsf/results/cifar100-vgg16_bn-sage_ds-rccl_sc_reference-s13/sage_ds.jsonl
+c7433a12df74dc0aaee4a3edb6a28f5771c9890e9d3c53156de8d1e153db62e6  /root/scsf/results/cifar100-vgg16_bn-sage_ds-rccl_sc_reference-s13/selected.pt
+
+== confirmation run dirs (in progress) ==
+e788697073a823027b9e36a79c49b251cdb78041369ff8999039194423982876  /root/scsf_v2_confirm/cifar10-vgg16_bn-sage_ds_v2-rccl_sc_reference-s17/best.pt
+d1aae96c31f3d2d79b86082a6a9dc81c4f827b7e5e6cfa806734abcc88a83e83  /root/scsf_v2_confirm/cifar10-vgg16_bn-sage_ds_v2-rccl_sc_reference-s17/cfg.json
+aa6a88bd32fad76fc88693bae39e5191915824b9a1a2a5afef851f1fbb745d06  /root/scsf_v2_confirm/cifar10-vgg16_bn-sage_ds_v2-rccl_sc_reference-s17/epoch_014.pt
+6fa1da393dbe30e5e42a71fdee86c863a4fef31e62174b8f8b3070c0678dd62b  /root/scsf_v2_confirm/cifar10-vgg16_bn-sage_ds_v2-rccl_sc_reference-s17/last.pt
+3cbd6939bdcdcf594396fa49d991b0ae684404e3e8072cb3785ef33344e85b5b  /root/scsf_v2_confirm/cifar10-vgg16_bn-sage_ds_v2-rccl_sc_reference-s17/sage_ds_v2.jsonl
+1b224878ec85b565e3eff07abbbdea133e7804ad0fdc4e2dcc6da729d9483142  /root/scsf_v2_confirm/cifar10-vgg16_bn-sage_ds_v2-rccl_sc_reference-s17/sage_ds_v2_utility.jsonl
+5df1f6cdeb4279015b76aac26d33ed71abd959708c59f477708fd3494f9d60ab  /root/scsf_v2_confirm/cifar10-vgg16_bn-sage_ds_v2-rccl_sc_reference-s17/selected.pt
