@@ -1,0 +1,29 @@
+# SAGE-V3 (robust training-aware gradient allocation).
+#
+# Preregistered in docs/SAGE_V3_PROTOCOL.md (commits 78ccbff, b653ce2).
+# Replaces the learned hard-concrete gate controller with a certified convex
+# QP over per-site auxiliary-gradient weights targeting a class-conditioned
+# robust selective surrogate (logsumexp over per-class J_c, tau = 10):
+#   * per-site directions: same-batch projected + normalized aux gradients;
+#   * exact deterministic active-set QP solved EVERY step (L <= 5 for VGG16-BN)
+#     with KKT-verified feasibility, certified before application;
+#   * applied update = g_CE + rho*||g_CE||*A*lambda (rho = 1);
+#   * robust gradient refreshed every utility_interval steps (default 50) on
+#     a deterministic class-balanced meta batch (k_meta = 8 per class);
+#   * lambda = 0 fallback on certificate failure.
+# All constants below are locked and dataset-independent.
+default_score: msp
+method:
+  score: msp
+  robust_tau: 10.0
+  budget_B: 1.0
+  rho: 1.0
+  qp_ridge: 1e-4
+  meta_k: 8
+  cert_tol: 1e-6
+  utility_interval: 50
+  projection_eps: 1e-8
+  hard_concrete_tau: 0.3
+  use_risk_head: false
+  amortized: false
+citation: "SAGE-V3 (robust class-conditioned selective target J_rob = logsumexp_tau(J_c); exact certified active-set QP over per-site proxied aux directions A from the same batch; applied g_CE + rho*||g_CE||*A*lambda with lambda=0 fallback); protocol in docs/SAGE_V3_PROTOCOL.md"

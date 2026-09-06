@@ -15,6 +15,15 @@ from .sage_ds_v2 import (  # noqa: F401
     cosine_utility,
     support_fraction,
 )
+from .sage_ds_v3 import (  # noqa: F401
+    AmortizedAllocationSolver,
+    SageDSV3Method,
+    class_balanced_meta_batch,
+    qp_certificate,
+    qp_kkt_residual,
+    robust_selective_target,
+    solve_sage_v3_qp,
+)
 from .depthfrag import (  # noqa: F401
     DepthFragMethod,
     FragHead,
@@ -50,6 +59,13 @@ __all__ = [
     "method_names",
     "SageDSMethod",
     "SageDSV2Method",
+    "SageDSV3Method",
+    "solve_sage_v3_qp",
+    "qp_certificate",
+    "qp_kkt_residual",
+    "robust_selective_target",
+    "class_balanced_meta_batch",
+    "AmortizedAllocationSolver",
     "bilevel_utilities",
     "cosine_utility",
     "support_fraction",

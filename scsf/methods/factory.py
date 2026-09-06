@@ -13,6 +13,7 @@ from .scsf import SCSFMethod
 from .selectivenet import SelectiveNetMethod
 from .sage_ds import SageDSMethod
 from .sage_ds_v2 import SageDSV2Method
+from .sage_ds_v3 import SageDSV3Method
 from .depthfrag import DepthFragMethod
 from .riskflow import RiskFlowMethod
 
@@ -54,6 +55,10 @@ for _n, _b in [
     # SAGE-V2: distinct class, bilevel-utility + per-site CE-safe projection.
     # Separate alias; sage_ds (v1) is preserved unchanged (protocol doc).
     ("sage_ds_v2", SageDSV2Method),
+    # SAGE-V3: certified QP allocation (primary) + amortized secondary alias
+    # that shares the class but is driven by method config (amortized: true).
+    ("sage_ds_v3", SageDSV3Method),
+    ("sage_ds_v3_amortized", SageDSV3Method),
     # DepthFrag: all aliases resolve to the same class driven by the method
     # config (ablation ladder + frozen control + sensitivity control).
     ("depthfrag", DepthFragMethod),

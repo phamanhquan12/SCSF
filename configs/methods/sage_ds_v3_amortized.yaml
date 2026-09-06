@@ -1,0 +1,22 @@
+# SAGE-V3 amortized solver (SECONDARY variant only; never in the 3-seed matrix).
+#
+# Same method class as sage_ds_v3 but with amortized: true it replaces the
+# exact QP solver with a small learned unrolled solver over the sufficient
+# statistics (G, b, q).  Registered under its own method name; every output is
+# still final-projected to the exact feasible set and certified.
+default_score: msp
+method:
+  score: msp
+  robust_tau: 10.0
+  budget_B: 1.0
+  rho: 1.0
+  qp_ridge: 1e-4
+  meta_k: 8
+  cert_tol: 1e-6
+  utility_interval: 50
+  projection_eps: 1e-8
+  hard_concrete_tau: 0.3
+  use_risk_head: false
+  amortized: true
+  amortized_steps: 4
+citation: "SAGE-V3 amortized (secondary efficiency variant: learned unrolled solver over G,b,q, final-projected + certified; excluded from the primary three-seed matrix); protocol in docs/SAGE_V3_PROTOCOL.md"
