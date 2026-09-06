@@ -264,7 +264,7 @@ def qp_kkt_residual(lambd: torch.Tensor, G: torch.Tensor, b: torch.Tensor,
     """
     L = int(lambd.numel())
     lam = lambd.double()
-    H = G.double() + ridge * torch.eye(L, dtype=torch.float64)
+    H = G.double() + ridge * torch.eye(L, dtype=torch.float64, device=G.device)
     if free is None:
         free = [i for i in range(L) if float(lam[i]) > tol]
     if active_sum is None:
@@ -275,26 +275,26 @@ def qp_kkt_residual(lambd: torch.Tensor, G: torch.Tensor, b: torch.Tensor,
     n_alpha = 1 if active_sum else 0
     n_beta = 1 if active_q else 0
     if free or n_alpha or n_beta:
-        F = torch.tensor(list(free), dtype=torch.long)
-        one_F = torch.ones(len(free), dtype=torch.float64)
+        F = torch.tensor(list(free), dtype=torch.long, device=G.device)
+        one_F = torch.ones(len(free), dtype=torch.float64, device=G.device)
         qneg_F = -q.double().index_select(0, F)
         cols = [H.index_select(0, F).index_select(1, F)]
         rhs = [b.double().index_select(0, F)]
         if active_sum:
             cols.append(one_F.unsqueeze(1))
-            rhs.append(torch.tensor([B]))
+            rhs.append(torch.tensor([B], device=G.device))
         if active_q:
             cols.append(qneg_F.unsqueeze(1))
-            rhs.append(torch.zeros((1,)))
+            rhs.append(torch.zeros((1,), device=G.device))
         n = len(free) + n_alpha + n_beta
         top = torch.cat(cols, dim=1)  # (lenF, n)
         rows = [top]
         if active_sum:
-            r = torch.zeros(n)
+            r = torch.zeros(n, device=G.device)
             r[:len(free)] = one_F
             rows.append(r.unsqueeze(0))
         if active_q:
-            r = torch.zeros(n)
+            r = torch.zeros(n, device=G.device)
             r[:len(free)] = qneg_F
             rows.append(r.unsqueeze(0))
         sol = torch.linalg.lstsq(torch.cat(rows, dim=0), torch.cat(rhs)).solution
@@ -302,11 +302,11 @@ def qp_kkt_residual(lambd: torch.Tensor, G: torch.Tensor, b: torch.Tensor,
         alpha = float(sol[len(free)]) if n_alpha else 0.0
         beta = float(sol[len(free) + n_alpha]) if n_beta else 0.0
     else:
-        lf = torch.zeros((0,))
+        lf = torch.zeros((0,), device=G.device)
         alpha = beta = 0.0
 
     if free:  # pin the affine multipliers from the free-coordinate stationarity
-        resid = H @ lam - b.double() + alpha * torch.ones(L) - beta * q.double()
+        resid = H @ lam - b.double() + alpha * torch.ones(L, device=G.device) - beta * q.double()
         free_set = set(int(i) for i in free)
         parts = []
         for i in range(L):
@@ -415,8 +415,8 @@ class AmortizedAllocationSolver(nn.Module):
 
     def forward(self, G: torch.Tensor, b: torch.Tensor, q: torch.Tensor):
         L = int(G.shape[0])
-        H = G.double() + self.ridge * torch.eye(L, dtype=torch.float64)
-        l = torch.zeros(L, dtype=torch.float64)
+        H = G.double() + self.ridge * torch.eye(L, dtype=torch.float64, device=G.device)
+        l = torch.zeros(L, dtype=torch.float64, device=G.device)
         m = torch.zeros_like(l)
         for t in range(self.steps):
             grad = H @ l - b.double()
