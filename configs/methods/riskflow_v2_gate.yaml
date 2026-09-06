@@ -1,0 +1,14 @@
+# RiskFlow-V2 gate ablation (NEVER reported as the primary method): restores
+# v1's multiplicative sample-dependent gate on top of the v2 architecture.
+default_score: riskflow_v2
+method:
+  score: riskflow_v2
+  remove_gate: false
+  use_soft: true
+  state_dim: 64
+  cell_hidden: 64
+  token: cls
+  delta_max: 2.0
+  huber_delta: 1.0
+  nu: 0.999
+citation: RiskFlow-V2 gate ablation (v1 multiplicative gate restored; ablation only)

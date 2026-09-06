@@ -1,0 +1,17 @@
+# RiskFlow-V2: stage-wise risk refinement with signed bounded innovations and
+# an EMA teacher. Hard channel supervised by teacher hard-error BCE at every
+# stage (base + sites); soft channel is an auxiliary bounded Huber regression
+# on the normalized teacher NLL. Inference confidence = 1 - sigmoid(s_L).
+# No dataset-specific hyperparameters (single values for both datasets).
+default_score: riskflow_v2
+method:
+  score: riskflow_v2
+  remove_gate: true
+  use_soft: true
+  state_dim: 64
+  cell_hidden: 64
+  token: cls
+  delta_max: 2.0
+  huber_delta: 1.0
+  nu: 0.999
+citation: RiskFlow-V2 - signed bounded per-stage risk logits, BCE on EMA-teacher hard error

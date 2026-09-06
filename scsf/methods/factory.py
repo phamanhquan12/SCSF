@@ -15,6 +15,7 @@ from .sage_ds import SageDSMethod
 from .sage_ds_v2 import SageDSV2Method
 from .depthfrag import DepthFragMethod
 from .riskflow import RiskFlowMethod
+from .riskflow_v2 import RiskFlowV2Method
 
 _REGISTRY: Dict[str, Callable[..., Method]] = {}
 
@@ -73,6 +74,10 @@ for _n, _b in [
     ("riskflow_resid", RiskFlowMethod),
     ("riskflow_frozen", RiskFlowMethod),
     ("riskflow_hard", RiskFlowMethod),
+    # RiskFlow-V2: stage-wise signed bounded risk logits, EMA teacher.
+    # remove_gate: false restores v1's multiplicative gate (ablation only).
+    ("riskflow_v2", RiskFlowV2Method),
+    ("riskflow_v2_gate", RiskFlowV2Method),
 ]:
     register_method(_n, _b)
 
