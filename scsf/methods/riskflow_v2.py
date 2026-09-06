@@ -55,6 +55,19 @@ def _soft_target(teacher_logits: torch.Tensor, y: torch.Tensor,
     return d.clamp(min=0.0, max=1.0 + 1e-6)
 
 
+class _BaseScale(nn.Module):
+    """Learned per-mode base (logit offset) scalars.
+
+    A 0-d ``nn.Parameter`` per mode, wrapped in a module so the base logits
+    are part of checkpoint state and param accounting (``inference_modules``).
+    """
+
+    def __init__(self, use_soft: bool):
+        super().__init__()
+        self.hard = nn.Parameter(torch.zeros(()))
+        self.soft = nn.Parameter(torch.zeros(())) if use_soft else None
+
+
 class InnovationCell(nn.Module):
     """Per-stage pre-bound innovation cell (hard channel).
 
@@ -163,8 +176,9 @@ class RiskFlowV2Method(Method):
         self.cells_soft = nn.ModuleDict(
             {s: SoftCell(self.state_dim, self.cell_hidden) for s in self.site_names}
         ) if self.use_soft else None
-        self.base_hard = nn.Parameter(torch.zeros(()))
-        self.base_soft = nn.Parameter(torch.zeros(())) if self.use_soft else None
+        self.base = _BaseScale(self.use_soft)
+        self.base_hard = self.base.hard
+        self.base_soft = self.base.soft
 
         # EMA teacher (submodule so checkpoints restore it bit-exact).
         self.teacher = copy.deepcopy(self.backbone)
@@ -270,7 +284,9 @@ class RiskFlowV2Method(Method):
         return self
 
     def inference_modules(self):
-        mods = [self.backbone, self.adapters, self.cells, self.base_hard]
+        mods = [self.backbone, self.adapters, self.cells, self.base]
+        if self.use_soft:
+            mods.append(self.cells_soft)
         return mods
 
     def optimizer_specs(self):

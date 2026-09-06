@@ -602,13 +602,11 @@ class SageDSV3Method(SageDSMethod):
             else:
                 lambd, info = solve_sage_v3_qp(G, bvec, qvec, self.budget_B,
                                                self.qp_ridge, self.cert_tol)
-            cert = qp_certificate(lambd, bvec, qvec, self.budget_B, self.cert_tol)
         else:
-            cert = qp_certificate(lambd, bvec=torch.zeros(L), q=torch.zeros(L),
-                                  B=self.budget_B, tol=self.cert_tol)
-            G = torch.zeros(L, L)
-            bvec = torch.zeros(L)
-            qvec = torch.zeros(L)
+            G = torch.zeros(L, L, dtype=torch.float64)
+            bvec = torch.zeros(L, dtype=torch.float64)
+            qvec = torch.zeros(L, dtype=torch.float64)
+        cert = qp_certificate(lambd, bvec, qvec, self.budget_B, self.cert_tol)
 
         certified = bool(cert["ok"]) if "ok" in cert else False
         fallback = False

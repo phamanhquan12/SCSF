@@ -319,6 +319,20 @@ def test_sage_ds_v3_fallback_zero_on_failed_certificate(tmp_path):
     assert torch.isfinite(total)
 
 
+def test_sage_ds_v3_pre_refresh_no_r_branch(tmp_path):
+    # Before the first robust-gradient refresh (_v3_round == -1) the cached r
+    # is unavailable; the no-QP branch must still certify with zero b/q inputs
+    # (regression: kwargs bvec=/q= were passed to qp_certificate(lambd, b, q, ...)).
+    m = _sg_method(results_root=str(tmp_path), seed=11, utility_interval=10**9)
+    m.train()
+    x, y, idx = torch.randn(6, 3, 32, 32), torch.randint(0, 10, (6,)), torch.arange(6)
+    loss_dict = m.train_loss((x, y, idx), SimpleNamespace(batch_index=1))
+    assert float(loss_dict["fallback_zero"]) == 1.0
+    assert float(loss_dict["lambda_sum"]) == 0.0
+    total = sum(v for v in loss_dict.values() if torch.is_tensor(v) and v.requires_grad)
+    assert torch.isfinite(total)
+
+
 # ---------------------------------------------------------------------------
 # 6. train/meta disjointness enforced (lock), and single-backward refresh.
 # ---------------------------------------------------------------------------
