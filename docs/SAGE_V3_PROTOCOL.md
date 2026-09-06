@@ -90,6 +90,18 @@ scientific point of v3, so class balancing is fixed and asserted.
 `J_rob` to the backbone parameters (`create_graph=False`), reusing v2's
 `_utility_params`. Test asserts one backward.
 
+### 3.3 Refresh cadence
+
+`g_r` (and with it `r`, `b`, `q`, the per-class `J_c`, robust weights and every
+statistics logged in section 8) is recomputed every `utility_interval` steps,
+mirroring the v2 cadence with `utility_interval = 50` (locked, single value for
+both datasets). Between refreshes the **last `r` is cached** and the QP is
+re-solved and certified **every step** from the *fresh* per-site directions
+`A` of that step and the cached `r`, so allocation tracks the current training
+batch exactly while the robust target is refreshed on the locked cadence. The
+meta batch used to refresh is a deterministic function of the refresh round
+(no RNG), so resume reproduces the exact same meta batches.
+
 ## 4. Deep-supervision directions
 
 For each candidate site `l` (resolved from `backbone.taps`, architecture
@@ -305,6 +317,10 @@ preserved.
 | projection_eps | 1e-8 |
 | k_meta (examples per class) | 8 |
 | certificate tolerance | 1e-6 |
+| utility_interval (robust refresh) | 50 |
+
+The exact QP is solved and certified **every training step**; the robust
+gradient `g_r` is refreshed every `utility_interval` steps (section 3.3).
 
 No dataset-specific hyperparameters are permitted anywhere in the primary
 method.
