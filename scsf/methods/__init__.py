@@ -32,6 +32,14 @@ from .depthfrag import (  # noqa: F401
     params_reached_by_probes,
     probe_gradient_report,
 )
+from .depthfrag_v2 import (  # noqa: F401
+    DepthFragV2Method,
+    whitened_rho,
+    teacher_whitened_targets,
+    iterative_boundary_distance,
+    compute_boundary_direction,
+    run_oracle_diagnostic,
+)
 from .riskflow import (  # noqa: F401
     InputAdapter,
     RiskCell,

@@ -15,6 +15,7 @@ from .sage_ds import SageDSMethod
 from .sage_ds_v2 import SageDSV2Method
 from .sage_ds_v3 import SageDSV3Method
 from .depthfrag import DepthFragMethod
+from .depthfrag_v2 import DepthFragV2Method
 from .riskflow import RiskFlowMethod
 
 _REGISTRY: Dict[str, Callable[..., Method]] = {}
@@ -69,6 +70,8 @@ for _n, _b in [
     ("depthfrag_frozen", DepthFragMethod),
     ("depthfrag_clip", DepthFragMethod),
     ("depthfrag_warm25", DepthFragMethod),
+    # DepthFrag-V2: distinct class, EMA-teacher whitened fragility (protocol).
+    ("depthfrag_v2", DepthFragV2Method),
     # RiskFlow: a single class driven by the mode config (ablation ladder +
     # frozen control + hard-channel-only control).
     ("riskflow", RiskFlowMethod),

@@ -1,0 +1,24 @@
+# DepthFrag-V2: stable whitened depth fragility (EMA-teacher targets).
+# Locked constants per docs/DEPTHFRAG_V2_PROTOCOL.md (single values, both
+# datasets): nu 0.999 (teacher EMA), nu_v 0.01 (feature-cov EMA), warmup 25,
+# eps 1e-12, huber_delta 1.0, agg soft_min tau 2.0, training-only clip stats.
+default_score: depthfrag
+method:
+  score: depthfrag
+  eps: 1e-12
+  bn_mode: eval_targets   # target geometry on teacher eval role (per-example
+                          # independence); probe/head run on student features
+  token: cls
+  probe_sites: all
+  terminal_site: top_l1
+  agg: soft_min           # soft-min across the depth profile
+  agg_tau: 2.0
+  cvar_frac: 0.25
+  probe_hidden: 32
+  huber_delta: 1.0
+  use_probes: true
+  use_head: true
+  nu: 0.999
+  nu_v: 0.01
+  warmup_epochs: 25
+citation: DepthFrag-V2 distilled whitened fragility from an EMA teacher
