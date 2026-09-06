@@ -48,6 +48,13 @@ from .riskflow import (  # noqa: F401
     decorrelation_penalty,
     pool_tap,
 )
+from .riskflow_v2 import (  # noqa: F401
+    InnovationCell,
+    RiskFlowV2Method,
+    RiskFlowV2Trace,
+    SoftCell,
+    _soft_target,
+)
 from .scores import (  # noqa: F401
     SCORE_FUNCS,
     compute_scores,
@@ -95,6 +102,11 @@ __all__ = [
     "RiskFlowTrace",
     "decorrelation_penalty",
     "pool_tap",
+    "RiskFlowV2Method",
+    "RiskFlowV2Trace",
+    "InnovationCell",
+    "SoftCell",
+    "_soft_target",
     "msp",
     "entropy",
     "negative_entropy",
