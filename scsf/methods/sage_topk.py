@@ -610,6 +610,7 @@ class SageTopKMethod(Method):
             "sum_lambda": float(lambd.sum().item()) if lambd.numel() else 0.0,
             "zero": bool(zero), "target_age": int(self._s_target_age),
             "refresh_step": int(self._s_refresh_step),
+            "selected": [self.site_names[i] for i in selected],
         }
         if cert is not None:
             row["cert_ok"] = bool(cert["ok"])
