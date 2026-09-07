@@ -24,6 +24,15 @@ from .sage_ds_v3 import (  # noqa: F401
     robust_selective_target,
     solve_sage_v3_qp,
 )
+from .sage_topk import (  # noqa: F401
+    SageTopKMethod,
+    LinearAuxHead,
+    allocation_certificate,
+    classification_compatible_direction,
+    normalize_direction,
+    select_topk_sites,
+    solve_topk_allocation,
+)
 from .depthfrag import (  # noqa: F401
     DepthFragMethod,
     FragHead,
@@ -75,6 +84,13 @@ __all__ = [
     "SageDSMethod",
     "SageDSV2Method",
     "SageDSV3Method",
+    "SageTopKMethod",
+    "LinearAuxHead",
+    "solve_topk_allocation",
+    "allocation_certificate",
+    "select_topk_sites",
+    "normalize_direction",
+    "classification_compatible_direction",
     "solve_sage_v3_qp",
     "qp_certificate",
     "qp_kkt_residual",

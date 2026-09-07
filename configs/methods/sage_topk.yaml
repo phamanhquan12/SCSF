@@ -1,0 +1,28 @@
+# SAGE-TopK: budgeted top-k selective deep supervision (exploratory pilot).
+#
+# Protocol: docs/SAGE_TOPK_PROTOCOL.md (registered before implementation).
+# Single-seed (13) exploratory pilot on CIFAR-10 and CIFAR-100, VGG16-BN,
+# recipe ccl_sc_reference.
+#
+# Locked pilot constants (not conventional-paper defaults; not to be tuned
+# from pilot results):
+#   * K = 2 selected companion sites after profiling;
+#   * profiling epochs 0-4; candidate utility measured every 50 training
+#     batches; selection by mean cosine utility (exact ties -> registration
+#     order); descriptive variance logged, no variance penalty;
+#   * B = 1 (convex allocation budget), rho = 1 (aux strength);
+#   * linear companion classifiers (native pooling -> Linear(d, C));
+#   * global selective surrogate inherited verbatim from SAGE-V2
+#     (soft_aurc_surrogate, tau = 0.3, MSP confidence, proxy error).
+default_score: msp
+method:
+  score: msp
+  k: 2
+  profiling_epochs: 5
+  utility_interval: 50
+  B: 1.0
+  rho: 1.0
+  surrogate_tau: 0.3
+  projection_eps: 1e-8
+  cert_tol: 1e-6
+citation: "SAGE-TopK (budgeted top-k selective deep supervision: 5-epoch profiling by mean cosine selective utility, fixed K=2 linear companion heads, convex allocation with B=1, rho=1, SAGE-V2 global selective surrogate); protocol in docs/SAGE_TOPK_PROTOCOL.md"

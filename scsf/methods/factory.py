@@ -14,6 +14,7 @@ from .selectivenet import SelectiveNetMethod
 from .sage_ds import SageDSMethod
 from .sage_ds_v2 import SageDSV2Method
 from .sage_ds_v3 import SageDSV3Method
+from .sage_topk import SageTopKMethod
 from .depthfrag import DepthFragMethod
 from .depthfrag_v2 import DepthFragV2Method
 from .riskflow import RiskFlowMethod
@@ -61,6 +62,9 @@ for _n, _b in [
     # that shares the class but is driven by method config (amortized: true).
     ("sage_ds_v3", SageDSV3Method),
     ("sage_ds_v3_amortized", SageDSV3Method),
+    # SAGE-TopK: single-seed exploratory pilot, frozen selection after a 5-epoch
+    # profiling stage + small convex allocation (protocol docs/SAGE_TOPK_PROTOCOL.md).
+    ("sage_topk", SageTopKMethod),
     # DepthFrag: all aliases resolve to the same class driven by the method
     # config (ablation ladder + frozen control + sensitivity control).
     ("depthfrag", DepthFragMethod),
