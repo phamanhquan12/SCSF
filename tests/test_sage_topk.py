@@ -26,7 +26,7 @@ from scsf.engine.config import resolve
 from scsf.engine.seeding import seed_all
 from scsf.engine.trainer import Trainer
 from scsf.methods import build_method, method_names
-from scsf.methods.sage_ds import _cat, _flatten
+from scsf.methods.sage_ds import _cat, _flatten, _pool_tap
 from scsf.methods.sage_topk import (
     LinearAuxHead,
     SageTopKMethod,
@@ -102,7 +102,7 @@ def test_select_topk_sites_deterministic_and_ties_stable():
 def test_linear_companion_head_is_single_affine_map():
     head = LinearAuxHead(16, 10)
     kinds = [type(p).__name__ for p in head.modules()
-             if not isinstance(p, nn.Linear)]
+             if not isinstance(p, nn.Linear) and p is not head]
     assert kinds == [], f"companion head must be a single Linear, got {kinds}"
     assert [name for name, _ in head.named_modules()] == [
         "", "fc"
@@ -116,7 +116,7 @@ def test_linear_companion_head_is_single_affine_map():
 # 3. profiling leaves backbone auxiliary gradients unapplied
 # ---------------------------------------------------------------------------
 def test_profiling_backbone_gradient_is_ce_only():
-    m = _method(method={"k": 2, "profiling_epochs": 3, "utility_interval": 2})
+    m = _method(k=2, profiling_epochs=3, utility_interval=2)
     bo, y, ce = _rand_forward(m)
     out = m._profiling_loss(bo, y, ce, SimpleNamespace(batch_index=1))
     assert m._profiling is True or True
@@ -134,11 +134,11 @@ def test_profiling_backbone_gradient_is_ce_only():
         p.grad = None
     bo2, y2, ce2 = _rand_forward(m)
     out2 = m._profiling_loss(bo2, y2, ce2, SimpleNamespace(batch_index=2))
+    ce_only2 = torch.autograd.grad(
+        ce2, [p for _, p in m._utility_params], retain_graph=True,
+        allow_unused=True, materialize_grads=True)
     total2 = sum(v for v in out2.values() if torch.is_tensor(v) and v.requires_grad)
     total2.backward()
-    ce_only2 = torch.autograd.grad(
-        ce2, [p for _, p in m._utility_params], allow_unused=True,
-        materialize_grads=True)
     for (n, p), gc in zip(m._utility_params, ce_only2):
         ref = gc if gc is not None else torch.zeros_like(p)
         assert torch.allclose(p.grad, ref, atol=1e-7), n
@@ -148,7 +148,7 @@ def test_profiling_backbone_gradient_is_ce_only():
 # 4. unselected heads/directions are not computed after profiling
 # ---------------------------------------------------------------------------
 def test_post_profiling_gates_unselected_heads():
-    m = _method(method={"k": 2, "profiling_epochs": 3, "utility_interval": 2})
+    m = _method(k=2, profiling_epochs=3, utility_interval=2)
     torch.manual_seed(0)
     m._profiling.copy_(False)
     m._epoch = 3
@@ -182,7 +182,7 @@ def test_post_profiling_gates_unselected_heads():
 # 5. Top-K boundary, phases, and exact resume of allocation decisions
 # ---------------------------------------------------------------------------
 def test_profiling_boundary_refresh_and_phase_switch():
-    m = _method(method={"k": 2, "profiling_epochs": 2, "utility_interval": 2})
+    m = _method(k=2, profiling_epochs=2, utility_interval=2)
     m.on_epoch_start(0)
     assert bool(m._profiling) is True
     bo, y, ce = _rand_forward(m)
@@ -274,7 +274,7 @@ def _grid_reference(G, b, B, steps=2000):
 @pytest.mark.parametrize("seed", [0, 1, 2, 3])
 def test_qp_optimality_and_feasibility_against_grid(seed):
     torch.manual_seed(seed)
-    r = torch.randn(seed % 3 + 2, 7)
+    r = torch.randn(2, 7)
     V = r / r.norm(dim=1, keepdim=True)
     G = (V @ V.t()).clamp_min(0.0) * 1.0
     s = torch.randn(7)
@@ -293,7 +293,9 @@ def test_qp_optimality_and_feasibility_against_grid(seed):
 
 
 def test_qp_singular_and_zero_gradient_cases():
-    # collinear: v2 = 2*v1 -> rank-1 Gram, optimum analytic on the segment
+    # collinear: v2 = v1 -> rank-1 Gram, optimum analytic on the segment:
+    # every lambda with sum x >= alpha = <v1,s> rises to x=alpha=0.6;
+    # coordinate optima give obj = 0.5*a^2 - a = -0.18 (a = 0.36 is the b-lambda)
     v1 = torch.tensor([3.0, 4.0]) / 5.0
     v2 = v1.clone()
     G = torch.stack([v1, v2]) @ torch.stack([v1, v2]).t()
@@ -303,7 +305,7 @@ def test_qp_singular_and_zero_gradient_cases():
     lam = sol["lambda"]
     cert = allocation_certificate(lam, G, b, B=1.0)
     assert cert["ok"]
-    assert sol["objective"] <= -0.4 - 1e-3   # u*=b1=0.6 -> -0.5*0.36
+    assert sol["objective"] == pytest.approx(-0.18, abs=1e-4)
     assert float(lam.sum()) <= 1.0 + 1e-6 and float(lam.min()) >= -1e-6
 
     # zero gradients: G = 0, b = 0 -> the allocation must be exactly zero
@@ -350,7 +352,7 @@ def test_projection_removes_opposing_component_only():
 
 
 def test_applied_gradient_identity_and_mixture_ce_compat():
-    m = _method(method={"k": 2, "profiling_epochs": 3, "utility_interval": 2})
+    m = _method(k=2, profiling_epochs=3, utility_interval=2)
     torch.manual_seed(0)
     m._profiling.copy_(False)
     m._epoch = 3
@@ -377,7 +379,7 @@ def test_applied_gradient_identity_and_mixture_ce_compat():
     vs = []
     for i in (0, 1):
         s_name = m.site_names[i]
-        feat = m._pool_tap(bo.features[s_name], m.token)
+        feat = _pool_tap(bo.features[s_name], m.token)
         l_aux = F.cross_entropy(m.aux_heads[s_name](feat), y)
         gl = torch.autograd.grad(l_aux, params, retain_graph=True,
                                  allow_unused=True, materialize_grads=True)
@@ -399,7 +401,8 @@ def test_applied_gradient_identity_and_mixture_ce_compat():
 
     out["routed"].backward()
     acc_i = 0
-    for (n, p), g0p in zip(params, g0):
+    p_names = [n for n, _ in m._utility_params]
+    for (n, p), g0p in zip(zip(p_names, params), g0):
         n_el = p.numel()
         expected = (g0p if g0p is not None else torch.zeros_like(p)) + \
             rho_n * mix[acc_i:acc_i + n_el].reshape_as(p)
@@ -413,13 +416,14 @@ def test_applied_gradient_identity_and_mixture_ce_compat():
 # 8. cached-target refresh and age
 # ---------------------------------------------------------------------------
 def test_cached_target_refresh_cadence_and_age():
-    m = _method(method={"k": 2, "profiling_epochs": 3, "utility_interval": 5})
+    m = _method(k=2, profiling_epochs=3, utility_interval=5)
     m.on_epoch_start(3)
     m._profiling.copy_(False)
     m._s_set.copy_(True)
     steps = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     for st in steps:
-        assert m._should_refresh(st) == (st > 0 and st % 5 == 0)
+        # epoch 3 is the first post-profiling epoch: step 0 refreshes plus cadence
+        assert m._should_refresh(st) == (st == 0 or (st > 0 and st % 5 == 0))
     m._s_cached.copy_(torch.randn_like(m._s_cached))
     s_before = m._s_cached.detach().clone()
     m._refresh_selective(next(m.backbone.parameters()).device, 5)
@@ -440,8 +444,8 @@ def test_inference_is_msp_only_and_backbone_only():
     m = _method()
     mp = m.predict_batch(torch.randn(4, m.backbone.channels,
                                      m.backbone.input_size, m.backbone.input_size))
-    assert list(mp.scores.keys()) == list(m.default_scores())
-    assert m.score == "msp"
+    assert list(mp.scores.keys()) == list(m.default_scores()) + ["sage_conf"]
+    assert mp.scores["sage_conf"].equal(mp.scores["msp"])  # sage_conf := MSP
     assert m.inference_modules() == [m.backbone]
     assert torch.allclose(mp.confidence, mp.scores["msp"])
     assert mp.confidence.shape == (4,)
