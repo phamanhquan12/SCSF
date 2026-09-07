@@ -294,6 +294,7 @@ class SageTopKMethod(Method):
         self.projection_eps = float(m.get("projection_eps", EPS))
         self.tol = float(m.get("cert_tol", TOL))
         self.token = str(m.get("token", "cls"))
+        self.candidates = str(m.get("candidates", "pool"))
 
         if self.k > 2:
             raise ValueError(
@@ -301,11 +302,38 @@ class SageTopKMethod(Method):
                 f"got k={self.k}")
 
         # candidates come exclusively from the backbone adapter registry
-        self.site_names = list(self.backbone.taps.keys())
+        taps = self.backbone.taps
+        if self.candidates == "pool":
+            self.site_names = [s for s in taps.keys() if not s.startswith("conv")]
+        elif self.candidates == "pool+conv":
+            self.site_names = list(taps.keys())
+        else:
+            raise ValueError(
+                f"unknown sage_topk candidate set {self.candidates!r} "
+                f"(expected 'pool' or 'pool+conv')")
         probe = self._probe_site_dims()
+        pool_names = [s for s in self.site_names if not s.startswith("conv")]
+        expanded = [s for s in self.site_names if s.startswith("conv")]
         self.aux_heads = nn.ModuleDict(
-            {s: LinearAuxHead(probe[s], self.num_classes) for s in self.site_names}
+            {s: LinearAuxHead(probe[s], self.num_classes) for s in pool_names}
         )
+        # Preserve the backbone RNG stream: initializing the additional heads
+        # for the expanded candidate set must not advance the global generator
+        # that later drives training-order/dropout randomness.  The pool-only
+        # candidate set constructs every head from the ambient stream; the
+        # pool+conv set snapshots the stream before the extra heads so their
+        # init is deterministic yet has zero effect on subsequent draws.
+        if expanded:
+            rng_state = torch.random.get_rng_state()
+            device = next(self.backbone.parameters()).device
+            cuda_state = None
+            if torch.cuda.is_available() and device.type == "cuda":
+                cuda_state = torch.cuda.get_rng_state(device)
+            for s in expanded:
+                self.aux_heads[s] = LinearAuxHead(probe[s], self.num_classes)
+            torch.random.set_rng_state(rng_state)
+            if cuda_state is not None:
+                torch.cuda.set_rng_state(cuda_state, device)
         self._aux_params = [p for h in self.aux_heads.values()
                             for p in h.parameters()]
         self._aux_param_ids = {id(p): i for i, p in enumerate(self._aux_params)}
@@ -486,7 +514,10 @@ class SageTopKMethod(Method):
             tilde = tilde.detach()
             til_n = float(torch.norm(tilde).item())
             raw = float(torch.dot(g_sel, tilde).item())
-            u_cos = cosine_utility(raw, gJ_n, til_n, eps=self.projection_eps)
+            # g_sel is already the unit-normalized meta direction, so the
+            # denominator is just the projected-aux norm (cosine of the two
+            # directions, not the SAGE-V2 *normalized* flavored statistic).
+            u_cos = cosine_utility(raw, 1.0, til_n, eps=self.projection_eps)
             i = self.site_names.index(s)
             self._utility_sum[i].add_(u_cos)
             self._utility_sumsq[i].add_(u_cos * u_cos)
@@ -699,14 +730,17 @@ class SageTopKMethod(Method):
         idx = select_topk_sites(means, self.k)
         with torch.no_grad():
             self._selected.copy_(torch.tensor(idx, dtype=torch.long))
+        stds = variances.sqrt()
         self._profile_stats = {
             "epoch": int(self._epoch),
             "n_measurements": int(n),
             "means": {s: float(means[i]) for i, s in enumerate(self.site_names)},
             "variances": {s: float(variances[i])
                           for i, s in enumerate(self.site_names)},
+            "stds": {s: float(stds[i]) for i, s in enumerate(self.site_names)},
             "selected": [self.site_names[i] for i in idx],
             "indices": idx,
+            "ranking_stability": self._ranking_stability(),
             "fallback_empty_measurements": bool(self._selection_fallback),
         }
         try:
@@ -716,6 +750,59 @@ class SageTopKMethod(Method):
                 json.dump(self._profile_stats, f, indent=2, sort_keys=True)
         except Exception:
             pass
+
+    def _ranking_stability(self) -> Optional[dict]:
+        """Ranking stability (descriptive only; kappa stays 0).
+
+        Reads the persisted profiling measurement rows and reports (a) the mean
+        top-2 cosine frequency (how often each candidate was in the per-
+        measurement top-2) and (b) the ``[0, n/2)`` vs ``[n/2, n)`` half-split
+        top-2 agreement (Jaccard overlap plus the two half sets). Returns None
+        if the logs are missing/unparseable.
+        """
+        try:
+            run_dir = os.path.join(self.cfg["results_root"], self.cfg["run_name"])
+            path = os.path.join(run_dir, "sage_topk_utility.jsonl")
+            if not os.path.exists(path):
+                return None
+            rows = []
+            with open(path) as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    r = json.loads(line)
+                    if r.get("phase") == "profiling" and "cos_pool1" in r:
+                        rows.append(r)
+            if not rows:
+                return None
+            sites = list(self.site_names)
+            cos = {s: [float(r[f"cos_{s}"]) for r in rows if f"cos_{s}" in r]
+                   for s in sites}
+            n = min(len(rows), self._utility_n.item())
+            counts = {s: 0 for s in sites}
+            for r in rows[:n]:
+                ranked = sorted(sites, key=lambda s: r.get(f"cos_{s}", -1e9),
+                                reverse=True)
+                for s in ranked[: self.k]:
+                    counts[s] += 1
+            freq = {s: float(counts[s]) / max(n, 1) for s in sites}
+            half = max(n // 2, 1)
+            def _topk(seq):
+                mu = {s: sum(r.get(f"cos_{s}", -1e9) for r in seq) / len(seq)
+                      for s in sites}
+                return sorted(sites, key=lambda s: mu[s], reverse=True)[: self.k]
+            first = _topk(rows[:half])
+            second = _topk(rows[half:2 * half])
+            inter = len(set(first) & set(second))
+            return {
+                "top2_frequency": freq,
+                "half_half_agree": bool(first == second),
+                "half_sets": {"first": first, "second": second},
+                "jaccard_half_sets": float(inter / max(len(set(first) | set(second)), 1)),
+                "n_used": int(n),
+            }
+        except Exception:
+            return None
 
     def _timing_deltas(self) -> Dict[str, dict]:
         out = {}

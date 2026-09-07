@@ -85,6 +85,80 @@ def test_site_candidates_come_from_adapter_registry():
     assert list(m.site_names) == list(m.backbone.taps.keys())  # registration order
 
 
+def test_vgg_pool_conv_candidate_set_registers_18_sites():
+    """Expanded candidate set: the 5 pool taps plus all 13 post-Conv-BN-ReLU
+    outputs, pool taps first so candidate indices 0-4 stay the pools."""
+    from scsf.backbones.vgg import vgg16_bn
+
+    bb = vgg16_bn(num_classes=10)
+    names = list(bb.taps.keys())
+    assert names[:5] == ["pool1", "pool2", "pool3", "pool4", "pool5"]
+    convs = names[5:]
+    assert len(convs) == 13
+    assert convs[:4] == ["conv1_1", "conv1_2", "conv2_1", "conv2_2"]
+    assert convs[-3:] == ["conv5_1", "conv5_2", "conv5_3"]
+    # every tap must be a captured feature tensor poolable to (B, C)
+    bo = bb(torch.zeros(2, 3, 32, 32))
+    for s in names:
+        f = bo.features[s]
+        assert f.dim() == 4
+        assert _pool_tap(f, "cls").shape == (2, f.shape[1])
+
+
+def test_method_candidate_set_filter():
+    m_pool = build_method(
+        "sage_topk",
+        resolve({"dataset": "cifar10", "backbone": "vgg16_bn",
+                 "method_name": "sage_topk", "recipe": "singlerun",
+                 "results_root": "/tmp/opencode/sage_topk_tests",
+                 "data": {"num_workers": 0},
+                 "method": {"candidates": "pool"},
+                 "train": {"device": "cpu", "seed": 13}}))
+    assert set(m_pool.site_names) == {f"pool{i}" for i in range(1, 6)}
+    m_all = build_method(
+        "sage_topk",
+        resolve({"dataset": "cifar10", "backbone": "vgg16_bn",
+                 "method_name": "sage_topk", "recipe": "singlerun",
+                 "results_root": "/tmp/opencode/sage_topk_tests",
+                 "data": {"num_workers": 0},
+                 "method": {"candidates": "pool+conv"},
+                 "train": {"device": "cpu", "seed": 13}}))
+    assert set(m_all.site_names) == set(m_all.backbone.taps.keys())
+    assert len(m_all.site_names) == 18
+    assert len(m_all.aux_heads) == 18
+    with pytest.raises(ValueError):
+        build_method(
+            "sage_topk",
+            resolve({"dataset": "cifar10", "backbone": "vgg16_bn",
+                     "method_name": "sage_topk", "recipe": "singlerun",
+                     "method": {"candidates": "bogus"}}))
+
+
+def test_expanded_heads_preserve_backbone_rng_stream():
+    """Initializing the 13 additional conv heads must not advance the global
+    RNG stream vs the pool-only build (training-order/dropout randomness is
+    therefore identical between the two candidate sets)."""
+
+    def build(candidates):
+        torch.manual_seed(13)
+        cfg = resolve({"dataset": "cifar10", "backbone": "vgg16_bn",
+                       "method_name": "sage_topk", "recipe": "singlerun",
+                       "results_root": "/tmp/opencode/sage_topk_tests",
+                       "data": {"num_workers": 0},
+                       "method": {"candidates": candidates},
+                       "train": {"device": "cpu", "seed": 13}})
+        m = build_method("sage_topk", cfg)
+        return torch.get_rng_state().clone(), m
+
+    rng_pool, _ = build("pool")
+    rng_all, m_all = build("pool+conv")
+    assert torch.equal(rng_pool, rng_all), (
+        "expanded head init advanced the backbone RNG stream")
+    # conv heads carry channel-dim Linear maps (native GAP -> Linear)
+    assert m_all.aux_heads["conv1_1"].fc.in_features == 64
+    assert m_all.aux_heads["conv5_3"].fc.in_features == 512
+
+
 def test_select_topk_sites_deterministic_and_ties_stable():
     means = torch.tensor([0.1, 0.9, 0.9, 0.3])
     a = select_topk_sites(means, 2)
@@ -110,6 +184,24 @@ def test_linear_companion_head_is_single_affine_map():
     out = head(torch.randn(4, 16))
     assert out.shape == (4, 10)
     assert not hasattr(head, "norm")
+
+
+def test_profile_cosine_bounded_after_norm_fix():
+    """The mean-cosine utility must lie in [-1, 1] (regression: the raw
+    utility was divided by the meta norm a second time after the direction was
+    already unit-normalized, producing impossible |cos| > 1 utilities such as
+    the CIFAR-100 pool means of ~4.7 / ~-7.9 in the first pilot)."""
+    m = _method(k=2, profiling_epochs=3, utility_interval=2)
+    bo, y, ce = _rand_forward(m)
+    n_before = len(m._util_rows)
+    m._profiling_loss(bo, y, ce, SimpleNamespace(batch_index=2))
+    new_rows = m._util_rows[n_before:]
+    assert new_rows, "measurement row not appended"
+    for row in new_rows:
+        for k, v in row.items():
+            if k.startswith("cos_"):
+                assert -1.0 - 1e-6 <= float(v) <= 1.0 + 1e-6, f"{k}={v}"
+    assert int(m._utility_n) == 1
 
 
 # ---------------------------------------------------------------------------

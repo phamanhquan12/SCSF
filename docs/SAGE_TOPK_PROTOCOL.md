@@ -1,6 +1,8 @@
 # SAGE-TopK: budgeted top-k selective deep supervision
 
-Status: **single-seed exploratory pilot** (preregistration before any implementation).
+Status: **single-seed exploratory pilot, round 2** (expanded candidate set +
+profiling-statistic normalization fix; preregistered before any implementation
+of the fix or of `pool+conv`).
 
 Companion docs: `docs/EMPIRICAL_CONTRACT.md` (shared empirical contract),
 `docs/SAGE_V2_PROTOCOL.md` (the selective surrogate SAGE-TopK inherits).
@@ -11,7 +13,28 @@ Companion docs: `docs/EMPIRICAL_CONTRACT.md` (shared empirical contract),
 CIFAR-100. One seed: **13**. Recipe: `ccl_sc_reference` (300 epochs, batch 64,
 SGD lr 0.1 / momentum 0.9 / wd 5e-4, multiplicative LR decay 0.5 every 25
 epochs, per-epoch validation, checkpoint-selection rule from the shared
-contract). **Total: two runs, one per dataset.**
+contract). **Total: four runs** — the two seed-13 runs per dataset for **each**
+candidate set: the original five pooling taps (`candidates = pool`) and the
+expanded 18-site set (`candidates = pool+conv`, five pools **plus** the
+13 post-Conv-BN-ReLU outputs). The round-1 `pool` runs are **not** used as a
+baseline because they were trained under the un-normalized statistics.
+
+> Round-1 additive fixes, all locked before these runs:
+>
+> 1. **Cosine double-normalization fix.** Phase-5's `g_sel` is already the
+>    unit-normalized selective direction, so the cosine utility was being
+>    divided by `||g_sel||` a second time, producing impossible `|U| > 1`
+>    means (observed CIFAR-100 pool means of ≈ 4.7 / −7.9). The profile
+>    statistic is now `U_l = <g_sel, tilde_g_l> / (||tilde_l|| + eps)` and is
+>    bounded in `[−1, 1]` (locked by a regression test).
+> 2. **RNG preservation for added heads.** Building the 13 conv companion heads
+>    must not advance the global generator that later drives data-shuffling /
+>    dropout randomness. Head construction snapshots and restores the global RNG
+>    state (CPU and CUDA), so `pool` and `pool+conv` builds consume the
+>    identical backbone-RNG stream (locked by a test).
+> 3. **Telemetry added:** per-candidate mean, std, and ranking stability
+>    (top-2 frequency, half-half split agreement, Jaccard) are logged; no
+>    variance penalty is introduced (`kappa` stays 0).
 
 DepthFrag, RiskFlow, and the SAGE-v3 certified allocation are **no longer part
 of the active queue**; their code, checkpoints, and results are preserved
@@ -57,9 +80,14 @@ allocation experiment.
 ## 4. Candidate sites and heads
 
 For VGG16-BN the natural pooling-stage taps are the five registered taps
-`pool1..pool5`. Candidates are obtained **through the backbone adapter**
-(`backbone.taps`), never as a VGG-specific list inside `sage_topk.py`; aliased
-representations are not duplicated.
+`pool1..pool5`. The expanded set adds **all 13 post-Conv-BN-ReLU outputs**
+(`conv1_1..conv1_2`, `conv2_1..conv2_2`, `conv3_1..conv3_3`,
+`conv4_1..conv4_3`, `conv5_1..conv5_3`), for 18 sites total. Pool taps stay at
+candidate indices 0–4; the conv taps follow in layer order. Candidates are
+obtained **through the backbone adapter** (`backbone.taps`), never as a
+VGG-specific list inside `sage_topk.py`; aliased representations are not
+duplicated. `method.candidates` selects `pool` (5 sites, round-1 behavior) or
+`pool+conv` (18 sites); the default is `pool`.
 
 > Limitation (documented): the method automatically selects among
 > **adapter-exposed** candidates. It does not discover arbitrary computational
@@ -94,7 +122,10 @@ L_aux_l = CE(head_l(feature_l), y)
   profiling.
 - Compute classification-compatible projected auxiliary gradients
   `tilde_g_l = proj(g_l)` against this batch's CE gradient (sec. 6 projection),
-  then the **cosine utility** `U_l = <g_sel, tilde_g_l> / (||g_sel|| ||tilde|| + eps)`.
+  then the **cosine utility**
+  `U_l = <g_sel, tilde_g_l> / (||tilde_l|| + eps)` where `g_sel` is the
+  **unit-normalized** selective direction (`s`); `eps` is the projection
+  epsilon. `U_l in [-1, 1]`.
 - Deterministic data (fixed meta-batch order) and tie handling (registration
   order). Accumulate mean utility and descriptive variance per candidate.
 - At the end of epoch 4: select the **two** candidates with highest mean

@@ -25,4 +25,5 @@ method:
   surrogate_tau: 0.3
   projection_eps: 1e-8
   cert_tol: 1e-6
+  candidates: pool
 citation: "SAGE-TopK (budgeted top-k selective deep supervision: 5-epoch profiling by mean cosine selective utility, fixed K=2 linear companion heads, convex allocation with B=1, rho=1, SAGE-V2 global selective surrogate); protocol in docs/SAGE_TOPK_PROTOCOL.md"

@@ -7,7 +7,9 @@ CIFAR head ``Linear(512,512) ReLU BN(512) Dropout2d Linear(C)`` (legacy
 classifier) is not used on CIFAR because that would break direct
 SCSF/CCL-SC compatibility.
 
-Taps: outputs right after each of the 5 max-pool layers (`pool1..pool5`).
+Taps: outputs right after each of the 5 max-pool layers (`pool1..pool5`) and
+after each of the 13 post-Conv-BN-ReLU blocks (`conv1_1..conv5_3`), registered
+with the pool taps first so candidate indices 0-4 are the pools.
 ``final_embedding`` = the post-BN 512-d projection features (the exact hook
 point CCL-SC's official code uses: ``classifier[:3]`` output).
 """
@@ -83,7 +85,24 @@ class VGG16BN(Backbone):
         self.final_dim = 512
         self._pool_idx = [i for i, m in enumerate(self.features) if isinstance(m, nn.MaxPool2d)]
         assert len(self._pool_idx) == 5, "expected 5 max pools"
-        self.taps = OrderedDict((f"pool{i + 1}", self.features[idx]) for i, idx in enumerate(self._pool_idx))
+        # 13 post-Conv-BN-ReLU blocks: each conv block is Conv2d -> ReLU -> BN,
+        # so the block output (after the BN) sits two modules past its Conv2d.
+        conv_idx = [i for i, m in enumerate(self.features) if isinstance(m, nn.Conv2d)]
+        assert len(conv_idx) == 13, f"expected 13 Conv2d blocks, got {len(conv_idx)}"
+        # pool taps first (indices 0-4), then conv1_1..conv5_3 in forward order
+        pool_taps = OrderedDict((f"pool{i + 1}", self.features[idx])
+                                for i, idx in enumerate(self._pool_idx))
+        cnt = [0] * 5
+        conv_taps = OrderedDict()
+        for ci in conv_idx:
+            stage = sum(1 for p in self._pool_idx if p < ci) + 1
+            cnt[stage - 1] += 1
+            conv_taps[f"conv{stage}_{cnt[stage - 1]}"] = self.features[ci + 2]
+        pool_taps.update(conv_taps)
+        self.taps = pool_taps
+        self._pool_out = {idx: i + 1 for i, idx in enumerate(self._pool_idx)}
+        self._conv_out = {ci + 2: name
+                          for name, ci in zip(conv_taps.keys(), conv_idx)}
         self.roles = {"top_l1": "pool5", "top_l2": "pool4"}
 
     def _initialize_weights(self):
@@ -121,8 +140,10 @@ class VGG16BN(Backbone):
         features = OrderedDict()
         for i, layer in enumerate(self.features):
             x = layer(x)
-            if i in self._pool_idx:
-                features[f"pool{self._pool_idx.index(i) + 1}"] = x
+            if i in self._pool_out:
+                features[f"pool{self._pool_out[i]}"] = x
+            elif i in self._conv_out:
+                features[self._conv_out[i]] = x
         flat = x.view(x.size(0), -1)
         return features, flat
 
