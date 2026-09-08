@@ -4,8 +4,9 @@ Preregistered protocol: ``docs/SAGE_TOPK_PROTOCOL.md``.
 
 Method identity (protocol section 3): automatic enumeration of registered
 backbone block-boundary candidates; a short profiling stage (epochs 0-4);
-fixed Top-K selection *after* profiling; normalized classification-compatible
-auxiliary directions; a small convex allocation problem. It has no learned
+fixed or significance-count Top-K selection *after* profiling; normalized
+classification-compatible auxiliary directions; a small convex allocation
+problem. It has no learned
 controller, no stochastic gates, no hard-concrete mechanism, no auxiliary
 confidence MLP, no robust/class-weighted selective objective, and no amortized
 solver.
@@ -21,8 +22,9 @@ Profiling (epochs 0-4)
   SAGE-V2 global selective surrogate gradient (``soft_aurc_surrogate`` on a
   deterministic disjoint meta batch) and the **mean cosine utility** and
   descriptive variance are accumulated per candidate;
-* at the end of epoch 4 the two candidates with highest mean utility are
-  selected (exact ties broken by registration order) and frozen.
+* at the end of epoch 4 the fixed-K candidates with highest mean utility are
+  selected, or the significant candidates are selected in dynamic-K mode;
+  exact ties are broken by registration order and selection is frozen.
 
 Training (epoch 5+)
 -------------------
@@ -35,9 +37,10 @@ Training (epoch 5+)
       min  0.5 lambda^T G lambda - b^T lambda
       s.t. lambda >= 0, sum(lambda) <= B        (G = V^T V, b = V^T s)
 
-  is solved exactly by deterministic enumeration for K = 2 and certified
-  before application (finite values, feasibility, objective no-worse-than
-  ``lambda = 0``, selective alignment, numeric mixture CE compatibility);
+  is solved by deterministic enumeration for K <= 2 or the dynamic-K
+  projected solver for K > 2, then certified before application (finite
+  values, feasibility, objective no-worse-than ``lambda = 0``, selective
+  alignment, numeric mixture CE compatibility);
   any failed check yields the **zero-update fallback** ``lambda = 0``;
 * the backbone update ``g_CE + rho * ||g_CE|| * V lambda`` (``rho = 1``) is
   routed via the dot-product loss trick (same mechanism as SAGE v1/v2).
@@ -59,7 +62,7 @@ import json
 import math
 import os
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -147,16 +150,111 @@ def select_topk_sites(means: torch.Tensor, k: int) -> List[int]:
     return order[:k]
 
 
+def select_dynamic_sites(means: torch.Tensor, stds: torch.Tensor, n: int,
+                         z_crit: float = 2.0, max_k: Optional[int] = None,
+                         precedent_k: int = 2) -> Tuple[List[int], dict]:
+    """Dynamic-K selection: K = number of candidates whose mean cosine utility
+    exceeds a per-measurement noise floor (protocol round-3).
+
+    A candidate is retained iff ``|mean_i| > z_crit * SEM_i`` where
+    ``SEM_i = std_i / sqrt(n)`` (two-sided significance against the null that
+    the site is noise).  This is the same mean-cosine ranking used by the
+    fixed-K rule, with the count chosen by the data instead of a frozen K.
+    Selection order preserves the mean ranking (ties by registration order).
+
+    ``n <= 0`` (no measurements) degrades to the fixed-K rule with
+    ``precedent_k`` candidates in registration order (the classic fallback).
+    Returns ``(indices, z_scores)`` where ``z_scores`` maps site index ->
+    ``|mean_i| / SEM_i``.
+    """
+    z_scores: dict = {}
+    if n <= 0:
+        fallback_k = max(0, min(int(precedent_k), int(means.numel())))
+        return list(range(fallback_k)), z_scores
+    sem = stds / math.sqrt(float(n))
+    z = means.abs() / (sem + EPS)
+    z_scores = {int(i): float(z[i]) for i in range(int(means.numel()))}
+    significant = [int(i) for i in range(int(means.numel())) if float(z[i]) > z_crit]
+    significant.sort(key=lambda i: (-float(means[i]), i))
+    if max_k is None:
+        max_k = int(means.numel())
+    k = max(0, min(int(max_k), len(significant)))
+    return significant[:k], z_scores
+
+
 # ---------------------------------------------------------------------------
-# deterministic K <= 2 convex allocation
+# deterministic convex allocation (enumeration for K <= 2, projected descent
+# for K > 2 as required by dynamic-K pilots)
 # ---------------------------------------------------------------------------
 def _qp_objective(lam: torch.Tensor, G: torch.Tensor, b: torch.Tensor) -> float:
     return float((0.5 * lam @ G @ lam - b @ lam).item())
 
 
+def _capped_simplex_solve(G: torch.Tensor, b: torch.Tensor, B: float = 1.0,
+                          tol: float = TOL, eps: float = EPS,
+                          max_iter: int = 2000) -> Tuple[torch.Tensor, float]:
+    """Deterministic projected-gradient QP on the capped simplex for any K.
+
+        min  0.5 lambda^T G lambda - b^T lambda
+        s.t. lambda >= 0,  sum(lambda) <= B
+
+    Used only when ``K > 2`` (dynamic-K pilots).  Determinism matters for the
+    exact-resume allocation identity, so every step is a fixed algebraic
+    recurrence in float64 with capped-simplex projection (clamp to ``>= 0``,
+    then water-filling to ``sum == B``).  At each iterate the direction
+    ``d = proj(lam - grad) - lam`` is descent-decreasing for PSD ``G``
+    (``G = V^T V`` with unit rows), and the exact minimizer of the quadratic
+    along the feasible segment ``[lam, lam + d]`` is taken in closed form,
+    clamped to the segment; the iteration stops when the projected-gradient
+    direction is no longer reducing (first-order optimality), or after
+    ``max_iter`` sweeps.  Returns ``(lambda64, objective64)`` in float64 on
+    the input device.
+    """
+    K = int(b.numel())
+    G64, b64 = G.double(), b.double()
+    dev = G.device
+    lam = torch.zeros(K, dtype=torch.float64, device=dev)
+
+    def _proj(x):
+        # project onto {x >= 0, sum(x) <= B}
+        x = torch.clamp(x, min=0.0)
+        s = float(x.sum().item())
+        if s <= B + tol:
+            return x
+        # water-filling over the simplex in float64 (deterministic sort): find
+        # the largest k with x_sorted[k] > theta, theta = (cumsum_k - B) / k.
+        xs, _ = torch.sort(x, descending=True)
+        ar = torch.arange(1, K + 1, dtype=xs.dtype, device=dev)
+        cum = torch.cumsum(xs, dim=0)
+        k_active = int((xs * ar - cum + B > 0).sum().item())
+        theta = float((cum[k_active - 1] - B).item() / k_active)
+        return torch.clamp(x - theta, min=0.0)
+
+    best_lam, best_obj = lam.clone(), 0.0
+    for _ in range(max_iter):
+        g = G64 @ lam - b64
+        d = _proj(lam - g) - lam
+        gd = float((g @ d).item())          # directional derivative at lam
+        dGd = float((d @ G64 @ d).item())   # 2 * quadratic coefficient
+        if gd >= -tol or gd == 0.0:
+            step = 0.0
+        elif dGd > eps:
+            # exact minimizer of f(lam + alpha d), alpha in [0, 1]
+            step = min(max(float(-gd / dGd), 0.0), 1.0)
+        else:
+            step = 1.0
+        lam = lam + step * d
+        obj = _qp_objective(lam, G64, b64)
+        if obj < best_obj:
+            best_obj, best_lam = obj, lam.clone()
+        if step == 0.0:
+            break
+    return best_lam, best_obj
+
+
 def solve_topk_allocation(G: torch.Tensor, b: torch.Tensor, B: float = 1.0,
                           tol: float = TOL, eps: float = 1e-12) -> Dict:
-    """Exact deterministic enumerative QP for K <= 2 (protocol section 8).
+    """Deterministic convex QP for the capped simplex (protocol section 8).
 
         min  0.5 lambda^T G lambda - b^T lambda
         s.t. lambda >= 0,  sum(lambda) <= B
@@ -180,9 +278,31 @@ def solve_topk_allocation(G: torch.Tensor, b: torch.Tensor, B: float = 1.0,
     K = int(b.numel())
     if G.shape != (K, K):
         raise ValueError(f"Gram must be {K}x{K}, got {tuple(G.shape)}")
+    if B < 0:
+        raise ValueError(f"allocation budget must be nonnegative, got {B}")
+    if K == 0:
+        return {
+            "lambda": torch.zeros(0, dtype=G.dtype, device=G.device),
+            "objective": 0.0,
+            "n_candidates": 0,
+            "status": "enum",
+        }
+    if B == 0:
+        zero = torch.zeros(K, dtype=G.dtype, device=G.device)
+        return {
+            "lambda": zero,
+            "objective": 0.0,
+            "n_candidates": K,
+            "status": "enum",
+        }
     if K > 2:
-        raise NotImplementedError(
-            "sage_topk protocol locks K=2; solver enumeration supports K <= 2")
+        lam64, obj64 = _capped_simplex_solve(G, b, B=B, tol=tol, eps=eps)
+        return {
+            "lambda": lam64.detach().clone().float(),
+            "objective": obj64,
+            "n_candidates": K,
+            "status": "pg",
+        }
 
     G64 = G.double()
     b64 = b.double()
@@ -286,6 +406,8 @@ class SageTopKMethod(Method):
         super().__init__(train_cfg)
         m = train_cfg["method"]
         self.k = int(m.get("k", 2))
+        self.dynamic_k = bool(m.get("dynamic_k", False))
+        self.dk_z_crit = float(m.get("dk_z_crit", 2.0))
         self.profiling_epochs = int(m.get("profiling_epochs", 5))
         self.utility_interval = int(m.get("utility_interval", 50))
         self.B = float(m.get("B", 1.0))
@@ -296,10 +418,13 @@ class SageTopKMethod(Method):
         self.token = str(m.get("token", "cls"))
         self.candidates = str(m.get("candidates", "pool"))
 
-        if self.k > 2:
+        if self.k > 2 and not self.dynamic_k:
             raise ValueError(
                 f"sage_topk protocol locks K <= 2 (deterministic enumeration); "
                 f"got k={self.k}")
+        if not math.isfinite(self.dk_z_crit) or self.dk_z_crit < 0.0:
+            raise ValueError(f"dk_z_crit must be finite and nonnegative, got "
+                             f"{self.dk_z_crit}")
 
         # candidates come exclusively from the backbone adapter registry
         taps = self.backbone.taps
@@ -311,6 +436,9 @@ class SageTopKMethod(Method):
             raise ValueError(
                 f"unknown sage_topk candidate set {self.candidates!r} "
                 f"(expected 'pool' or 'pool+conv')")
+        self.dk_max_k = int(m.get("dk_max_k", len(self.site_names)))
+        if self.dk_max_k < 0:
+            raise ValueError(f"dk_max_k must be nonnegative, got {self.dk_max_k}")
         probe = self._probe_site_dims()
         pool_names = [s for s in self.site_names if not s.startswith("conv")]
         expanded = [s for s in self.site_names if s.startswith("conv")]
@@ -345,9 +473,10 @@ class SageTopKMethod(Method):
 
         # -- exact-resume state lives in registered buffers (checkpoints) -----
         self.register_buffer("_profiling", torch.tensor(True))
-        self.register_buffer("_selected",
-                             torch.full((self.k,), -1, dtype=torch.long))
         n_sites = len(self.site_names)
+        # sized to the full candidate set so dynamic K (0..n_sites) fits
+        self.register_buffer("_selected",
+                             torch.full((n_sites,), -1, dtype=torch.long))
         self.register_buffer("_utility_sum", torch.zeros(n_sites))
         self.register_buffer("_utility_sumsq", torch.zeros(n_sites))
         self.register_buffer("_utility_n", torch.zeros((), dtype=torch.long))
@@ -719,18 +848,31 @@ class SageTopKMethod(Method):
 
     def _finalize_selection(self):
         n = int(self._utility_n)
-        means = torch.zeros(len(self.site_names))
-        variances = torch.zeros(len(self.site_names))
+        n_sites = len(self.site_names)
+        means = torch.zeros(n_sites)
+        variances = torch.zeros(n_sites)
         if n > 0:
             means = self._utility_sum.detach().cpu().clone() / float(n)
             variances = (self._utility_sumsq.detach().cpu().clone() / float(n)
                          - means * means).clamp_min(0.0)
         else:
             self._selection_fallback = True
-        idx = select_topk_sites(means, self.k)
-        with torch.no_grad():
-            self._selected.copy_(torch.tensor(idx, dtype=torch.long))
         stds = variances.sqrt()
+
+        if self.dynamic_k:
+            idx, z_scores = select_dynamic_sites(
+                means, stds, n, z_crit=self.dk_z_crit,
+                max_k=self.dk_max_k, precedent_k=self.k)
+            k_used = len(idx)
+        else:
+            idx = select_topk_sites(means, self.k)
+            k_used = len(idx)
+            z_scores = None
+
+        with torch.no_grad():
+            self._selected.fill_(-1)
+            if idx:
+                self._selected[:k_used].copy_(torch.tensor(idx, dtype=torch.long))
         self._profile_stats = {
             "epoch": int(self._epoch),
             "n_measurements": int(n),
@@ -740,7 +882,11 @@ class SageTopKMethod(Method):
             "stds": {s: float(stds[i]) for i, s in enumerate(self.site_names)},
             "selected": [self.site_names[i] for i in idx],
             "indices": idx,
-            "ranking_stability": self._ranking_stability(),
+            "k_selected": k_used,
+            "dynamic_k": bool(self.dynamic_k),
+            "z_crit": float(self.dk_z_crit) if self.dynamic_k else None,
+            "z_scores": (z_scores if z_scores is not None else None),
+            "ranking_stability": self._ranking_stability(topk=k_used),
             "fallback_empty_measurements": bool(self._selection_fallback),
         }
         try:
@@ -751,15 +897,17 @@ class SageTopKMethod(Method):
         except Exception:
             pass
 
-    def _ranking_stability(self) -> Optional[dict]:
+    def _ranking_stability(self, topk: Optional[int] = None) -> Optional[dict]:
         """Ranking stability (descriptive only; kappa stays 0).
 
         Reads the persisted profiling measurement rows and reports (a) the mean
-        top-2 cosine frequency (how often each candidate was in the per-
-        measurement top-2) and (b) the ``[0, n/2)`` vs ``[n/2, n)`` half-split
-        top-2 agreement (Jaccard overlap plus the two half sets). Returns None
-        if the logs are missing/unparseable.
+        top-k cosine frequency (how often each candidate was in the per-
+        measurement top-``topk``) and (b) the ``[0, n/2)`` vs ``[n/2, n)``
+        half-split top-``topk`` agreement (Jaccard overlap plus the two half
+        sets), where ``topk`` defaults to the fixed ``k``. Returns None if the
+        logs are missing/unparseable.
         """
+        topk = max(0, int(self.k if topk is None else topk))
         try:
             run_dir = os.path.join(self.cfg["results_root"], self.cfg["run_name"])
             path = os.path.join(run_dir, "sage_topk_utility.jsonl")
@@ -783,23 +931,25 @@ class SageTopKMethod(Method):
             for r in rows[:n]:
                 ranked = sorted(sites, key=lambda s: r.get(f"cos_{s}", -1e9),
                                 reverse=True)
-                for s in ranked[: self.k]:
+                for s in ranked[: topk]:
                     counts[s] += 1
             freq = {s: float(counts[s]) / max(n, 1) for s in sites}
             half = max(n // 2, 1)
             def _topk(seq):
                 mu = {s: sum(r.get(f"cos_{s}", -1e9) for r in seq) / len(seq)
                       for s in sites}
-                return sorted(sites, key=lambda s: mu[s], reverse=True)[: self.k]
+                return sorted(sites, key=lambda s: mu[s], reverse=True)[: topk]
             first = _topk(rows[:half])
             second = _topk(rows[half:2 * half])
             inter = len(set(first) & set(second))
             return {
-                "top2_frequency": freq,
+                "topk_frequency": freq,
+                "top2_frequency": freq if topk == 2 else None,
                 "half_half_agree": bool(first == second),
                 "half_sets": {"first": first, "second": second},
                 "jaccard_half_sets": float(inter / max(len(set(first) | set(second)), 1)),
                 "n_used": int(n),
+                "k_used": int(topk),
             }
         except Exception:
             return None

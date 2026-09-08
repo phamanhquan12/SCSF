@@ -1,8 +1,10 @@
 # SAGE-TopK: budgeted top-k selective deep supervision
 
-Status: **single-seed exploratory pilot, round 2** (expanded candidate set +
-profiling-statistic normalization fix; preregistered before any implementation
-of the fix or of `pool+conv`).
+Status: **single-seed exploratory pilot, round 3** (dynamic-K variant; registered
+before any implementation of the dynamic-K rule). Round-2 (fixed K=2, `pool` and
+`pool+conv` candidate sets) results are complete and reported; the round-3 runs
+pilot **K selected by the data** on the same two candidate sets and datasets,
+paired against the round-2 and SAGE-V2 seed-13 checkpoints.
 
 Companion docs: `docs/EMPIRICAL_CONTRACT.md` (shared empirical contract),
 `docs/SAGE_V2_PROTOCOL.md` (the selective surrogate SAGE-TopK inherits).
@@ -36,6 +38,37 @@ baseline because they were trained under the un-normalized statistics.
 >    (top-2 frequency, half-half split agreement, Jaccard) are logged; no
 >    variance penalty is introduced (`kappa` stays 0).
 
+> Round-3 dynamic-K rule, locked before implementation:
+>
+> 1. **Profiling is unchanged:** the same fixed window (epochs 0–4) and the
+>    same mean-cosine utility over the ~70 measurement batches per candidate;
+>    selection is still frozen after epoch 4.
+> 2. **K is chosen by the data — the significance count at the end of
+>    profiling.** A candidate is selected iff its mean utility exceeds the
+>    per-measurement noise floor:
+>
+>        |mean_l| > z_crit * SEM_l,   SEM_l = std_l / sqrt(n)
+>
+>    with `z_crit = 2.0` (two-sided, registration-order tie-break), and K is
+>    capped at the candidate-set size (`dk_max_k`, default = number of sites).
+>    K is therefore a whole number in `[0, n_sites]`, decided once at epoch 4.
+>    K = 0 (all candidates below the floor) disables the auxiliary path:
+>    ordinary final-head CE only, and the zero-update/zero-aux events are
+>    counted as usual.
+> 3. **Deviation from round 1/2 is deliberate and explicit:** the fixed-K
+>    runs keep `candidates` = pool / pool+conv with K = 2; the dynamic-K runs
+>    keep the identical candidate sets with `dynamic_k = true` and `k` ignored
+>    (used only as the no-measurements fallback bound).
+> 4. **K > 2 needs a general allocation.** The protocol locked exhaustive
+>    enumeration for K ≤ 2; for K > 2 the QP is solved with a deterministic
+>    pure-PyTorch projected-gradient descent on the capped simplex
+>    (`lambda >= 0`, `sum(lambda) <= B`, water-filling projection, exact
+>    segment line-search, float64, fixed iteration bound). Determinism is lock-
+>    tested (bit-identical lambda across identical inputs); the certification
+>    (feasibility, selectiveness, objective no-worse-than-zero, mixture-CE
+>    compatibility) still gates every applied allocation, and any failed check
+>    yields the zero-update fallback exactly as in round 2.
+
 DepthFrag, RiskFlow, and the SAGE-v3 certified allocation are **no longer part
 of the active queue**; their code, checkpoints, and results are preserved
 untouched. This pilot does **not** modify any existing method.
@@ -48,7 +81,10 @@ loss coefficients, or the selective target).
 
 | Setting | Value |
 |---|---|
-| `K` (top candidates kept) | 2 |
+| `K` (fixed-K runs) | 2 |
+| dynamic-K runs | significance count in `[0, n_sites]` |
+| `dk_z_crit` | 2.0 |
+| `dk_max_k` | candidate-set size (18 for `pool+conv`) |
 | `seed` | 13 (per dataset) |
 | profiling epochs | 0–4 (five epochs) |
 | profiling utility interval | every 50th training batch |
@@ -68,7 +104,7 @@ The same settings apply to CIFAR-10 and CIFAR-100.
 SAGE-TopK has:
 - automatic enumeration of registered backbone block-boundary candidates;
 - a short profiling stage (epochs 0–4);
-- fixed Top-K selection *after* profiling;
+- fixed Top-K or dynamic significance-count selection *after* profiling;
 - normalized, classification-compatible auxiliary directions;
 - a small convex allocation problem (`K x K` Gram).
 
@@ -191,14 +227,16 @@ subj. to     lambda >= 0
              sum(lambda) <= B                         (B = 1)
 ```
 
-Solver: a **deterministic exact enumeration for K = 2** that checks the
-interior (unconstrained minimizer, if feasible) and every boundary face
-(`lambda_i = 0` (1-D clamped solution), and the `sum(lambda) = B` segment
-(1-D quadratic minimization)) and takes the feasible candidate with the smallest
-objective. Singular/collinear directions are handled **without** silently adding
-a ridge penalty that changes the objective (zero rows/columns simply remove a
-coordinate). A trusted small reference (fine grid + direct enumeration) is used
-in unit tests to verify optimality.
+Solver: for `K <= 2`, a **deterministic exact enumeration** checks the interior
+(unconstrained minimizer, if feasible) and every boundary face (`lambda_i = 0`
+(1-D clamped solution), and the `sum(lambda) = B` segment (1-D quadratic
+minimization)) and takes the feasible candidate with the smallest objective.
+For dynamic `K > 2`, deterministic pure-PyTorch projected descent uses a
+capped-simplex water-filling projection and exact line search along each
+feasible segment. Singular/collinear directions are handled **without** silently
+adding a ridge penalty that changes the objective. A trusted small reference
+(fine grid for K=3 + direct enumeration for K<=2) and repeated-input identity
+checks are used in unit tests.
 
 Every individual direction is already CE-projected, so a separate CE constraint
 is mathematically redundant in exact arithmetic. The final mixture is
@@ -254,21 +292,24 @@ dominate small solves.
 ## 11. Launch
 
 After tests and smoke pass: forward commits to `origin/quan`; a fresh mirror
-pinned to the final commit; a **new** results root; **exactly the two seed-13
-runs**; batch size, optimizer, LR schedule, augmentations, dataset splits, and
-checkpoint-selection rule identical to `ccl_sc_reference`; concurrency chosen
-from smoke throughput/memory. Record source commit, dirty state, resolved
-configuration, split hashes, selected sites, profiling statistics, and
-environment. No additional seeds, backbones, methods, or ablations are launched
-automatically.
+pinned to the final commit; a **new** results root; **exactly the four dynamic-K
+seed-13 runs** (CIFAR-10 × CIFAR-100 × `pool` × `pool+conv`, `dynamic_k = true`,
+`dk_z_crit = 2.0`); batch size, optimizer, LR schedule, augmentations, dataset
+splits, and checkpoint-selection rule identical to `ccl_sc_reference`;
+concurrency chosen from smoke throughput/memory. Record source commit, dirty
+state, resolved configuration, split hashes, selected sites (including the
+data-chosen K and per-candidate z scores), profiling statistics, and environment.
+No additional seeds, backbones, methods, or ablations are launched automatically.
 
 ## 12. Report
 
-Paired against the existing matched SAGE-V2 seed-13 checkpoints on both
-datasets: accuracy; AURC and exact excess-AURC; failure AUROC/AUPR; full
-risk-coverage table; mean- and worst-class AURC; selected sites and profiling
-utilities; allocation weights over training; zero-update frequency; profiling
-cost and post-profiling epoch time; measured total training time and inference
-overhead. All negative results are reported. A single seed supports an
-exploratory decision only; it cannot establish statistical superiority or the
-full baseline gate.
+Paired against the existing matched SAGE-V2 seed-13 checkpoints **and the
+round-2 fixed-K seed-13 checkpoints** on both datasets: accuracy; AURC and exact
+excess-AURC; failure AUROC/AUPR; full risk-coverage table; mean- and worst-class
+AURC; data-chosen K, selected sites, z scores, and profiling utilities;
+allocation weights over training; zero-update frequency; profiling cost and
+post-profiling epoch time; measured total training time and inference overhead.
+A K = 0 outcome (auxiliary path disabled everywhere) is reported explicitly and
+treated as a negative/empty result, not silenced. All negative results are
+reported. A single seed supports an exploratory decision only; it cannot
+establish statistical superiority or the full baseline gate.

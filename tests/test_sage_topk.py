@@ -33,6 +33,7 @@ from scsf.methods.sage_topk import (
     allocation_certificate,
     classification_compatible_direction,
     normalize_direction,
+    select_dynamic_sites,
     select_topk_sites,
     solve_topk_allocation,
 )
@@ -244,7 +245,8 @@ def test_post_profiling_gates_unselected_heads():
     torch.manual_seed(0)
     m._profiling.copy_(False)
     m._epoch = 3
-    m._selected.copy_(torch.tensor([0, 1], dtype=torch.long))
+    m._selected.fill_(-1)
+    m._selected[:2].copy_(torch.tensor([0, 1], dtype=torch.long))
     # any reference to an unselected head must explode
     def boom(*a, **k):
         raise AssertionError("unselected companion head was invoked")
@@ -448,7 +450,8 @@ def test_applied_gradient_identity_and_mixture_ce_compat():
     torch.manual_seed(0)
     m._profiling.copy_(False)
     m._epoch = 3
-    m._selected.copy_(torch.tensor([0, 1], dtype=torch.long))
+    m._selected.fill_(-1)
+    m._selected[:2].copy_(torch.tensor([0, 1], dtype=torch.long))
     m.utility_interval = 10 ** 9   # no refresh during this step
     params = [p for _, p in m._utility_params]
     dev = next(m.backbone.parameters()).device
@@ -555,3 +558,114 @@ def test_registry_preserves_previous_methods():
                        "train": {"device": "cpu", "epochs": 1, "seed": 13}})
         method = build_method(name, cfg)
         assert method is not None
+
+
+# ---------------------------------------------------------------------------
+# 11. dynamic-K selection (protocol round 3) and the K > 2 QP path
+# ---------------------------------------------------------------------------
+def test_select_dynamic_sites_significance_ordering_and_cap():
+    # 5 candidates; n = 100 measurements; sample std = 1 -> SEM = 0.1.
+    # z_crit = 2.0 admits |mean| > 0.2 * (SEM offset). Order is by mean desc
+    # among the significant set, preserving registration order on ties.
+    means = torch.tensor([0.35, 0.42, -0.45, 0.05, 0.21])
+    stds = torch.full((5,), 1.0)
+    n, z_crit = 100, 2.0
+    idx, z_scores = select_dynamic_sites(means, stds, n, z_crit=z_crit)
+    # significant: |mean| > 0.2  -> 0.35, 0.42, -0.45, 0.21 (not 0.05)
+    assert set(idx) == {0, 1, 2, 4}
+    # mean-descending order among significant sites
+    assert idx == [1, 0, 4, 2]
+    assert z_scores[3] == pytest.approx(0.5, abs=1e-4)
+    # cap by max_k truncates deterministically
+    idx2, _ = select_dynamic_sites(means, stds, n, z_crit=z_crit, max_k=2)
+    assert idx2 == [1, 0]
+    # zero threshold admits everything in mean order
+    idx3, _ = select_dynamic_sites(means, stds, n, z_crit=0.0)
+    assert idx3 == [1, 0, 4, 3, 2]
+
+
+def test_select_dynamic_sites_no_measurements_fallback_and_empty():
+    means = torch.tensor([0.1, 0.9, 0.9])
+    # no profiling measurements: degrade to the fixed-K registration-order
+    # fallback boundary k (protocol: precedent_k = self.k)
+    assert select_dynamic_sites(means, torch.zeros(3), 0, precedent_k=2)[0] == [0, 1]
+    # measurements with none above the noise floor: empty selection (K = 0)
+    means2 = torch.tensor([0.01, -0.01, 0.005])
+    stds2 = torch.tensor([1.0, 1.0, 1.0])
+    idx, zs = select_dynamic_sites(means2, stds2, 100, z_crit=2.0, max_k=3)
+    assert idx == []
+    assert all(z < 2.0 for z in zs.values())
+
+
+def test_dynamic_finalize_selection_records_k_zero_and_fallback(tmp_path):
+    m = _method(results_root=str(tmp_path), dynamic_k=True, dk_z_crit=2.0,
+                dk_max_k=4)
+    with torch.no_grad():
+        m._utility_n.copy_(100)
+        m._utility_sum.copy_(torch.tensor([0.01, -0.01, 0.005, 0.0]))
+        m._utility_sumsq.copy_(torch.ones(4))
+    m._finalize_selection()
+    assert m.selected_sites() == []
+    assert m._profile_stats["k_selected"] == 0
+    assert m._profile_stats["dynamic_k"] is True
+    assert all(int(i) == -1 for i in m._selected.tolist())
+
+    m2 = _method(results_root=str(tmp_path / "fallback"), dynamic_k=True,
+                 dk_z_crit=2.0, dk_max_k=4)
+    m2._finalize_selection()
+    assert m2.selected_sites() == m2.site_names[:2]
+    assert m2._profile_stats["fallback_empty_measurements"] is True
+
+
+def test_solve_topk_allocation_large_k_deterministic_and_feasible():
+    # K=5 random feasible instance: result must be deterministic, feasible,
+    # no-worse-than-zero, and reproduce identical lambda across calls.
+    torch.manual_seed(7)
+    r = torch.randn(5, 9)
+    V = r / r.norm(dim=1, keepdim=True)
+    G = V @ V.t()
+    s = torch.randn(9)
+    b = V @ (s / s.norm())
+    B = 1.0
+    sol_a = solve_topk_allocation(G, b, B=B)
+    sol_b = solve_topk_allocation(G.clone(), b.clone(), B=B)
+    assert sol_a["status"] == "pg"
+    assert torch.allclose(sol_a["lambda"], sol_b["lambda"], atol=1e-9)
+    cert = allocation_certificate(sol_a["lambda"], G, b, B=B)
+    assert cert["ok"], cert
+    assert sol_a["objective"] <= 1e-6
+
+
+def test_solve_topk_allocation_k3_matches_grid_reference():
+    # Independent fine-grid check for K=3 (the smallest K > 2 case).
+    torch.manual_seed(11)
+    r = torch.randn(3, 6)
+    V = r / r.norm(dim=1, keepdim=True)
+    G = V @ V.t()
+    s = torch.randn(6)
+    b = V @ (s / s.norm())
+    B = 1.0
+    steps = 60
+    best_o = 1e9
+    for i in range(steps + 1):
+        for j in range(steps - i + 1):
+            for k in range(steps - i - j + 1):
+                lam = torch.tensor([i / steps, j / steps, k / steps],
+                                   dtype=G.dtype)
+                o = float((0.5 * lam @ G @ lam - b @ lam).item())
+                if o < best_o:
+                    best_o = o
+    sol = solve_topk_allocation(G, b, B=B)
+    assert sol["objective"] <= best_o + 1e-3
+    assert allocation_certificate(sol["lambda"], G, b, B=B)["ok"]
+
+
+def test_sage_topk_dynamic_k_guard_and_build():
+    # guard: fixed K > 2 is still rejected, dynamic K is allowed at any site set
+    with pytest.raises(ValueError):
+        _method(k=3)
+    m = _method(k=3, dynamic_k=True, dk_z_crit=2.0, dk_max_k=18)
+    assert m.dynamic_k and m.dk_z_crit == 2.0 and m.dk_max_k == 18
+    assert int(m._selected.numel()) == len(m.site_names)
+    # pool-only resnet18: 4 sites -> buffer wide enough for dynamic-K size
+    assert all(int(x) == -1 for x in m._selected.tolist())

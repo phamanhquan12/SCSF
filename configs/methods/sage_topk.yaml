@@ -6,7 +6,8 @@
 #
 # Locked pilot constants (not conventional-paper defaults; not to be tuned
 # from pilot results):
-#   * K = 2 selected companion sites after profiling;
+#   * fixed runs use K = 2 selected companion sites after profiling; optional
+#     dynamic runs use the registered significance-count rule;
 #   * profiling epochs 0-4; candidate utility measured every 50 training
 #     batches; selection by mean cosine utility (exact ties -> registration
 #     order); descriptive variance logged, no variance penalty;
@@ -18,6 +19,9 @@ default_score: msp
 method:
   score: msp
   k: 2
+  dynamic_k: false
+  dk_z_crit: 2.0
+  dk_max_k: 18
   profiling_epochs: 5
   utility_interval: 50
   B: 1.0
@@ -26,4 +30,4 @@ method:
   projection_eps: 1e-8
   cert_tol: 1e-6
   candidates: pool
-citation: "SAGE-TopK (budgeted top-k selective deep supervision: 5-epoch profiling by mean cosine selective utility, fixed K=2 linear companion heads, convex allocation with B=1, rho=1, SAGE-V2 global selective surrogate); protocol in docs/SAGE_TOPK_PROTOCOL.md"
+citation: "SAGE-TopK (budgeted top-k selective deep supervision: 5-epoch profiling by mean cosine selective utility, K=2 linear companion heads by default with optional dynamic K from noise-floor significance |mean| > z_crit*SEM, convex allocation with B=1, rho=1, SAGE-V2 global selective surrogate); protocol in docs/SAGE_TOPK_PROTOCOL.md"
