@@ -57,6 +57,14 @@ Quick smoke (tiny overfit) so no full training is required:
 ./scripts/run_smoke.sh
 ```
 
+The portable SAGE-TopK dynamic-K pilot launcher is documented in
+`docs/SAGE_TOPK_REPRODUCE.md` and runs with:
+
+```bash
+python scripts/run_sage_topk_dynamic.py --data-root /path/to/cifar-data \
+  --results-root /path/to/new/results --python /path/to/venv/bin/python
+```
+
 ## Configuration
 
 `configs/` — datasets, backbones, methods, recipes — is merged in order
