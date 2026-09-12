@@ -13,6 +13,7 @@ from .scsf import SCSFMethod
 from .scsf_correctness import SCSFCorrectnessMethod
 from .dtr_scsf import DTRSCSFMethod
 from .r3_scsf import R3SCSFMethod
+from .cbr_scsf import CBRSCSFMethod
 from .selectivenet import SelectiveNetMethod
 from .sage_ds import SageDSMethod
 from .sage_ds_v2 import SageDSV2Method
@@ -57,6 +58,11 @@ for _n, _b in [
     # incorrect example on detached final-block+classifier clones; RC-weighted
     # pairwise ordering + repair CE over two deterministic views.
     ("r3_scsf", R3SCSFMethod),
+    # CBR-SCSF: Confusion-Budgeted Risk — soft-coverage implicit thresholds
+    # with analytic tap-in derivatives, per-coverage micro/confusion losses
+    # and dual ascent on the per-class coverage floor at the optimizer-step
+    # boundary (nu never enters a model optimizer).
+    ("cbr_scsf", CBRSCSFMethod),
     ("ccl_sc", CCLSCMethod),
     ("sage_ds", SageDSMethod),
     # SAGE-DS topology/ablation aliases: all resolve to the same class driven

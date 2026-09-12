@@ -263,6 +263,9 @@ class Trainer:
                 total.backward()
                 for opt in self.optimizers:
                     opt.step()
+                # Ascent boundary: once after the declared successful steps
+                # (e.g. CBR dual ascent). Never invoked inside train_loss.
+                self.method.after_step(loss_dict, self)
             self.batch_index = 0
             self.scheduler.step()
             self.method.on_epoch_end(epoch, {})

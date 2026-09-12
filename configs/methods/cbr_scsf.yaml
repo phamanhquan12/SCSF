@@ -1,0 +1,69 @@
+default_score: cbr_conf
+method:
+  score: cbr_conf
+  taps: [top_l2, top_l1]
+  pretrain: 0
+  coverages: [0.70, 0.80, 0.90, 0.95]
+  Ts0: 1.0
+  Ts1: 4.0
+  eta: 1.0
+  beta: 1.0
+  tau: 0.1
+  kappa: 1.0
+  eta_dual: 0.01
+  dual_max: 100.0
+  w_c: null
+  use_micro: true
+  use_confusion: true
+  use_floor: true
+  group_by_class: false
+  group_max: false
+  edge_min_support: 10
+  edge_update_every: 1
+  init_meta_weight: 1.0
+  min_meta_weight: 0.0001
+  meta_lr: 0.0001
+  calibrator_hidden_dims: [1024, 512, 256, 128]
+  calibrator_dropout: 0.3
+  error_weight: 1.0
+meta_lr: 0.0001
+variants:
+  cbr_full:
+    method:
+      use_micro: true
+      use_confusion: true
+      use_floor: true
+  cbr_global_multicov:
+    method:
+      use_confusion: false
+      use_floor: false
+  cbr_conf_nfloor:
+    method:
+      use_floor: false
+  cbr_floor_nconf:
+    method:
+      use_confusion: false
+  cbr_true_class_group:
+    method:
+      use_confusion: false
+      group_by_class: true
+  cbr_single_cov:
+    method:
+      coverages: [0.95]
+      w_c: [1.0]
+  cbr_groupdro:
+    method:
+      use_confusion: false
+      use_floor: false
+      group_by_class: true
+      group_max: true
+  ce_weighted:
+    method:
+      eta: 0.0
+      beta: 0.0
+      use_floor: false
+citation: CBR-SCSF (review §8 pp.11-13); soft-coverage implicit thresholds with
+  implemented tap-in derivative, per-coverage micro + confusion losses over
+  supported edges, dual ascent on per-class coverage floors at the optimizer
+  boundary. Ts, tau, kappa, dual LR and the equal coverage weights are adopted
+  unvalidated defaults — see docs/RC_TRAINING_IMPLEMENTATION.md §8.

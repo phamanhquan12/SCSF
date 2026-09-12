@@ -100,6 +100,15 @@ class Method(nn.Module):
     def train_loss(self, batch, state) -> Dict[str, torch.Tensor]:
         raise NotImplementedError
 
+    def after_step(self, loss_items: Dict[str, torch.Tensor], state) -> None:
+        """Run once per declared successful optimizer step (post-``step``).
+
+        Default no-op. CBR uses this boundary for dual ascent: ``nu`` moves
+        here, **never** inside ``train_loss`` (spec §8.2), so no optimizer step
+        is hidden and ascent is blocked at exactly the right point.
+        """
+        return None
+
     def on_epoch_start(self, epoch: int) -> None:
         return None
 
