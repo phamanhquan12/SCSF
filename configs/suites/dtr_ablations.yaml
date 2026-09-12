@@ -1,0 +1,14 @@
+# §7.4 dtr ablations — exact variant ids of configs/methods/dtr_scsf.yaml.
+suite: dtr_ablations
+recipe: single_run
+backbones: [resnet18]
+datasets: [cifar10]
+seeds: [13]
+rows:
+  - {id: dtr_full,                 method_name: dtr_scsf, variant: dtr_full}
+  - {id: dtr_aux_ce,              method_name: dtr_scsf, variant: dtr_aux_ce}
+  - {id: dtr_state_norepair,      method_name: dtr_scsf, variant: dtr_state_norepair}
+  - {id: dtr_cond_norc,           method_name: dtr_scsf, variant: dtr_cond_norc}
+  - {id: dtr_rev_kd_all,          method_name: dtr_scsf, variant: dtr_rev_kd_all}
+  - {id: dtr_rev_kd_correct_probe, method_name: dtr_scsf, variant: dtr_rev_kd_correct_probe}
+  - {id: dtr_rand_states,         method_name: dtr_scsf, variant: dtr_rand_states}

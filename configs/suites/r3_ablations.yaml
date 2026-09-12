@@ -1,0 +1,15 @@
+# §6.4 r3 ablations — exact variant ids of configs/methods/r3_scsf.yaml.
+# Never included in `all`; selectable via `--suite r3_ablations`.
+suite: r3_ablations
+recipe: single_run
+backbones: [resnet18]
+datasets: [cifar10]
+seeds: [13]
+rows:
+  - {id: r3_full,                 method_name: r3_scsf, variant: r3_full}
+  - {id: r3_uniform_rank,        method_name: r3_scsf, variant: r3_uniform_rank}
+  - {id: r3_rc_rank,             method_name: r3_scsf, variant: r3_rc_rank}
+  - {id: r3_hard_ce,             method_name: r3_scsf, variant: r3_hard_ce}
+  - {id: r3_fixed,               method_name: r3_scsf, variant: r3_fixed}
+  - {id: r3_shuffled,            method_name: r3_scsf, variant: r3_shuffled}
+  - {id: r3_detach_feat,         method_name: r3_scsf, variant: r3_detach_feat}

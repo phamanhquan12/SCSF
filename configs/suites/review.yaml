@@ -1,0 +1,16 @@
+# ~/. Recipe: review — the accepted primary family for this handoff.
+#   * Exactly the §10.2 "review" row ids; lengths and dedup are locked by
+#     tests/test_launcher.py (5 rows, union with "sage" -> 8 ids, no repeats).
+#   * Each row is (id, method_name, variant); variant folds into run_name and
+#     config_hash like the engine's `method.variant`.
+suite: review
+recipe: single_run
+backbones: [resnet18]
+datasets: [cifar10]
+seeds: [13]
+rows:
+  - {id: ce,                        method_name: ce,            variant: null}
+  - {id: scsf_correctness,          method_name: scsf_correctness, variant: null}
+  - {id: r3_scsf,                   method_name: r3_scsf,      variant: null}
+  - {id: dtr_scsf,                  method_name: dtr_scsf,     variant: null}
+  - {id: cbr_scsf,                  method_name: cbr_scsf,     variant: null}

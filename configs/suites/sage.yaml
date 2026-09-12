@@ -1,0 +1,17 @@
+# ~/. Recipe: sage — the SAGE family (V2 dense + TopK fixed-K=2 pool/pool+conv).
+#   * Exactly the §10.2 "sage" row ids; ce control reuses the registered method.
+#   * TopK rows share the SageTopKMethod class; the registered *factory id* is
+#     `sage_topk` (only).  The suite rows use the exact documented ids
+#     `sage_topk_v2_fixedk2_pool` / `..._pool_conv`; the launcher maps them to
+#     method_name `sage_topk` + variant (dynamic_k=false, K=2) and FAILS LOUDLY
+#     anywhere in the matrix if either id is absent from the mapper.
+suite: sage
+recipe: single_run
+backbones: [resnet18]
+datasets: [cifar10]
+seeds: [13]
+rows:
+  - {id: ce,                            method_name: ce,                       variant: null}
+  - {id: sage_ds_v2,                    method_name: sage_ds_v2,               variant: null}
+  - {id: sage_topk_v2_fixedk2_pool,     method_name: sage_topk,                variant: v2_fixedk2_pool}
+  - {id: sage_topk_v2_fixedk2_pool_conv, method_name: sage_topk,               variant: v2_fixedk2_pool_conv}

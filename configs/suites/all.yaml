@@ -1,0 +1,19 @@
+# ~/. Recipe: all — the deduplicated union of `review` (5) and `sage` (4).
+#   * Exactly §10.2 "all": union dedup keeps 8 ids (5+4, review∩sage = {ce}).
+#   * Forward-declared here (not computed at plan time) so plan counts are
+#     deterministic and locked by tests/test_launcher.py (16-run example:
+#     8 ids x 2 datasets x 1 backbone x 1 seed).
+suite: all
+recipe: single_run
+backbones: [resnet18]
+datasets: [cifar10, cifar100]
+seeds: [13]
+rows:
+  - {id: ce,                      method_name: ce,                       variant: null}
+  - {id: scsf_correctness,        method_name: scsf_correctness,         variant: null}
+  - {id: r3_scsf,                 method_name: r3_scsf,                  variant: null}
+  - {id: dtr_scsf,                method_name: dtr_scsf,                 variant: null}
+  - {id: cbr_scsf,                method_name: cbr_scsf,                 variant: null}
+  - {id: sage_ds_v2,              method_name: sage_ds_v2,               variant: null}
+  - {id: sage_topk_v2_fixedk2_pool,      method_name: sage_topk,         variant: v2_fixedk2_pool}
+  - {id: sage_topk_v2_fixedk2_pool_conv, method_name: sage_topk,         variant: v2_fixedk2_pool_conv}

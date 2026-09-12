@@ -1,0 +1,14 @@
+# §8.5 cbr ablations — exact variant ids of configs/methods/cbr_scsf.yaml.
+suite: cbr_ablations
+recipe: single_run
+backbones: [resnet18]
+datasets: [cifar10]
+seeds: [13]
+rows:
+  - {id: cbr_full,               method_name: cbr_scsf, variant: cbr_full}
+  - {id: cbr_global_multicov,   method_name: cbr_scsf, variant: cbr_global_multicov}
+  - {id: cbr_conf_nfloor,       method_name: cbr_scsf, variant: cbr_conf_nfloor}
+  - {id: cbr_floor_nconf,       method_name: cbr_scsf, variant: cbr_floor_nconf}
+  - {id: cbr_true_class_group,  method_name: cbr_scsf, variant: cbr_true_class_group}
+  - {id: cbr_single_cov,        method_name: cbr_scsf, variant: cbr_single_cov}
+  - {id: cbr_groupdro,          method_name: cbr_scsf, variant: cbr_groupdro}

@@ -103,7 +103,7 @@ def scheduler(manifest: str, results_root: str, python: str, dry_run: bool = Fal
         t0 = time.time()
         logfile = os.path.join(log_root, short.replace("/", "__") + ".log")
         if not dry_run:
-            train_cmd = [python, "-m", "scsf.train"] + args.split()
+            train_cmd = [python, "-m", "scsf.train"] + shlex.split(args)
             if resume_from:
                 train_cmd += ["+resume_from=" + resume_from]
             try:
