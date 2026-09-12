@@ -58,6 +58,29 @@ def _load_layer(kind, name):
     return _load_yaml(os.path.join(CONFIG_ROOT, kind, f"{name}.yaml"))
 
 
+def _load_method_layer(name, _seen=None):
+    """Load a method YAML, resolving ``extends`` inheritance (deep merge).
+
+    Parent layer is deep-merged first, then the child layer overrides it,
+    so nested method subtrees inherit without clobbering (a child that only
+    sets ``method.pretrain`` keeps its parent's ``method.taps``). Cycles are
+    detected and hard-fail.
+    """
+    _seen = set() if _seen is None else set(_seen)
+    if name in _seen:
+        raise ValueError(f"cyclic method `extends` involving {name!r}")
+    _seen.add(name)
+    layer = _load_layer("methods", name)
+    parent = layer.get("extends")
+    if parent:
+        if not isinstance(parent, str):
+            raise ValueError("method `extends` must be a single method name string")
+        merged = deepcopy(_load_method_layer(parent, _seen))
+        _deep_merge(merged, layer)
+        return merged
+    return layer
+
+
 def _coerce(value):
     if isinstance(value, str):
         low = value.lower()
@@ -130,7 +153,7 @@ def resolve(overrides: dict) -> dict:
 
     ds_layer = _load_layer("datasets", dataset)
     bb_layer = _load_layer("backbones", backbone)
-    mtd_layer = _load_layer("methods", method_name)
+    mtd_layer = _load_method_layer(method_name)
     rcp_layer = _load_layer("recipes", recipe)
 
     cfg = dict(_DEFAULTS)
@@ -238,6 +261,11 @@ def run_name_for(cfg: dict) -> str:
     mode = cfg.get("method", {}).get("mode")
     if cfg.get("method_name") == "scsf" and mode and mode != "posthoc":
         name += f".{mode}"
+    # Repeat-run variants of the same method+score+mode (e.g. r3_small,
+    # coverage-window) must never share a run dir.
+    variant = cfg.get("method", {}).get("variant")
+    if variant:
+        name += f".{variant}"
     return f"{name}-r{cfg['recipe']}-s{cfg['train'].get('seed', 13)}"
 
 

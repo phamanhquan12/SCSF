@@ -107,6 +107,52 @@ def test_vgg_backbone_dispatch_defaults():
     assert cfg["backbones"]["vgg16_bn"]["input_size"] == 32
 
 
+def test_method_extends_deep_merge(monkeypatch):
+    layers = {
+        "base": {
+            "default_score": "scsf_corr",
+            "method": {"taps": ["top_l2", "top_l1"], "pretrain": 0,
+                       "min_meta_weight": 1e-4},
+        },
+        "child": {"extends": "base", "method": {"pretrain": 5}},
+    }
+    monkeypatch.setattr(
+        config,
+        "_load_layer",
+        lambda kind, name: layers.get(name, {}) if kind == "methods" else {},
+    )
+    cfg = config.resolve({"method_name": "child"})
+    assert cfg["method"]["taps"] == ["top_l2", "top_l1"]   # inherited
+    assert cfg["method"]["pretrain"] == 5                  # child overrides
+    assert cfg["method"]["min_meta_weight"] == 1e-4
+    assert cfg["default_score"] == "scsf_corr"
+
+
+def test_method_extends_cycle_detected(monkeypatch):
+    layers = {
+        "a": {"extends": "b", "method": {"x": 1}},
+        "b": {"extends": "a", "method": {"x": 2}},
+    }
+    monkeypatch.setattr(
+        config,
+        "_load_layer",
+        lambda kind, name: layers.get(name, {}) if kind == "methods" else {},
+    )
+    with pytest.raises(ValueError):
+        config.resolve({"method_name": "a"})
+
+
+def test_method_variant_disambiguates_run_name():
+    plain = config.resolve({"method_name": "scsf_correctness",
+                            "method": {"variant": "cov0.95"}})
+    other = config.resolve({"method_name": "scsf_correctness",
+                            "method": {"variant": "full"}})
+    assert plain["run_name"] != other["run_name"]
+    assert plain["run_name"].endswith("scsf_correctness.cov0.95-rsinglerun-s13")
+    none_variant = config.resolve({"method_name": "scsf_correctness"})
+    assert ".cov0.95" not in none_variant["run_name"]
+
+
 def test_ccl_sc_reference_recipe_matches_paper_and_dispatches_by_dataset():
     common = {"backbone": "vgg16_bn", "recipe": "ccl_sc_reference"}
     c10 = config.resolve({**common, "dataset": "cifar10", "method_name": "ccl_sc"})

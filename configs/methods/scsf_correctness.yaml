@@ -1,0 +1,13 @@
+default_score: scsf_corr
+method:
+  score: scsf_corr
+  taps: [top_l2, top_l1]
+  pretrain: 0
+  init_meta_weight: 1.0
+  min_meta_weight: 0.0001
+  error_weight: 1.0
+  meta_lr: 0.0001
+  calibrator_hidden_dims: [1024, 512, 256, 128]
+  calibrator_dropout: 0.3
+meta_lr: 0.0001
+citation: SCSF review-aligned correctness baseline (CE + correctness-BCE; features attached, logits detached; correctly-oriented cosine meta-weight schedule). Distinct from legacy TCP-MSE scsf — see docs/RC_TRAINING_IMPLEMENTATION.md.

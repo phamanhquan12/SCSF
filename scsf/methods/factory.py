@@ -10,6 +10,7 @@ from .ccl_sc import CCLSCMethod
 from .dg import DeepGamblersMethod
 from .sat import SATMethod
 from .scsf import SCSFMethod
+from .scsf_correctness import SCSFCorrectnessMethod
 from .selectivenet import SelectiveNetMethod
 from .sage_ds import SageDSMethod
 from .sage_ds_v2 import SageDSV2Method
@@ -43,6 +44,10 @@ for _n, _b in [
     ("selectivenet", SelectiveNetMethod),
     ("sat", SATMethod),
     ("scsf", SCSFMethod),
+    # Review-aligned correctness baseline: CE + correctness-BCE (features
+    # attached, logits detached), correctly-oriented cosine meta-weight.
+    # Distinct class; legacy scsf (TCP-MSE, inverted schedule) is preserved.
+    ("scsf_correctness", SCSFCorrectnessMethod),
     ("ccl_sc", CCLSCMethod),
     ("sage_ds", SageDSMethod),
     # SAGE-DS topology/ablation aliases: all resolve to the same class driven

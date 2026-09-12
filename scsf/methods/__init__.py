@@ -64,6 +64,13 @@ from .riskflow_v2 import (  # noqa: F401
     SoftCell,
     _soft_target,
 )
+from .scsf import (  # noqa: F401
+    MODES,
+    SCSFMethod,
+    MetaCalibrator,
+    meta_weight_cosine,
+)
+from .scsf_correctness import SCSFCorrectnessMethod  # noqa: F401
 from .scores import (  # noqa: F401
     SCORE_FUNCS,
     compute_scores,
@@ -123,6 +130,7 @@ __all__ = [
     "InnovationCell",
     "SoftCell",
     "_soft_target",
+    "SCSFCorrectnessMethod",
     "msp",
     "entropy",
     "negative_entropy",
