@@ -72,6 +72,7 @@ from .scsf import (  # noqa: F401
 )
 from .scsf_correctness import SCSFCorrectnessMethod  # noqa: F401
 from .dtr_scsf import DTRProbe, DTRSCSFMethod  # noqa: F401
+from .r3_scsf import OMEGA_PREFIXES, R3SCSFMethod  # noqa: F401
 from .scores import (  # noqa: F401
     SCORE_FUNCS,
     compute_scores,
@@ -134,6 +135,8 @@ __all__ = [
     "SCSFCorrectnessMethod",
     "DTRProbe",
     "DTRSCSFMethod",
+    "R3SCSFMethod",
+    "OMEGA_PREFIXES",
     "msp",
     "entropy",
     "negative_entropy",

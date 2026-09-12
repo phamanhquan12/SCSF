@@ -12,6 +12,7 @@ from .sat import SATMethod
 from .scsf import SCSFMethod
 from .scsf_correctness import SCSFCorrectnessMethod
 from .dtr_scsf import DTRSCSFMethod
+from .r3_scsf import R3SCSFMethod
 from .selectivenet import SelectiveNetMethod
 from .sage_ds import SageDSMethod
 from .sage_ds_v2 import SageDSV2Method
@@ -52,6 +53,10 @@ for _n, _b in [
     # DTR-SCSF: four-state transition repair with (1,0)-conditioned reverse KD
     # and a two-view training path (probe excluded from deployment).
     ("dtr_scsf", DTRSCSFMethod),
+    # R3-SCSF: Repair-or-Rank — virtual repairability rho measured per
+    # incorrect example on detached final-block+classifier clones; RC-weighted
+    # pairwise ordering + repair CE over two deterministic views.
+    ("r3_scsf", R3SCSFMethod),
     ("ccl_sc", CCLSCMethod),
     ("sage_ds", SageDSMethod),
     # SAGE-DS topology/ablation aliases: all resolve to the same class driven

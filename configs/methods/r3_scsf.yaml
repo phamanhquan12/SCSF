@@ -1,0 +1,62 @@
+default_score: r3_conf
+method:
+  score: r3_conf
+  taps: [top_l2, top_l1]
+  pretrain: 0
+  beta: 1.0
+  gamma: 1.0
+  margin: 0.0
+  temperature: 1.0
+  eps_rank: 0.001
+  eta_virtual: 1.0
+  init_meta_weight: 1.0
+  min_meta_weight: 0.0001
+  meta_lr: 0.0001
+  calibrator_hidden_dims: [1024, 512, 256, 128]
+  calibrator_dropout: 0.3
+  error_weight: 1.0
+  wbar_clip_max: null
+  rho:
+    max_errors: 8
+    refresh_interval: 10
+    default: 0.5
+    cache_capacity: 65536
+    measure_seed: 13
+    eta_virtual: 1.0
+meta_lr: 0.0001
+variants:
+  r3_full:
+    method:
+      beta: 1.0
+      gamma: 1.0
+  r3_uniform_rank:
+    method:
+      gamma: 0.0
+  r3_rc_rank:
+    method:
+      rho:
+        default: 0.5
+      gamma: 0.0
+  r3_hard_ce:
+    method:
+      beta: 0.0
+      rho:
+        default: 1.0
+  r3_fixed:
+    method:
+      rho:
+        max_errors: 0
+        default: 0.5
+  r3_shuffled:
+    method:
+      rho:
+        max_errors: 0
+        default: 0.5
+      rho_shuffle_seed: 13
+  r3_detach_feat:
+    method:
+      detach_features: true
+citation: R3-SCSF (review §6 pp.7-8); virtual repairability rho over the
+  final-block+classifier subset, RC-weighted pairwise ranking + repair CE,
+  two deterministic views. eta_virtual, sampling cadence and the constant
+  rho default are adopted unvalidated defaults — see docs/RC_TRAINING_IMPLEMENTATION.md §7.
