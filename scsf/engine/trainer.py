@@ -18,6 +18,7 @@ import torch
 
 from ..data import assert_no_official_test_leakage, get_split, split_hashes
 from ..data.cifar import build_dataloader
+from ..data.two_view import build_two_view_dataloader
 from ..methods import build_method
 from ..metrics import all_metrics, selective_risk_at_coverages
 from ..version import __version__, package_versions
@@ -93,11 +94,17 @@ class Trainer:
 
         # persistent generator: its consumed state is the data-order contract
         self.generator = make_generator(self.cfg["train"]["data_order_seed"])
-        self.train_loader = build_dataloader(
-            self.cfg, "train", generator=self.generator,
-            return_indices=self.method.needs_indices,
-            overfit=int(self.cfg["train"].get("overfit", 0)),
-        )
+        if self.method.needs_two_views:
+            self.train_loader = build_two_view_dataloader(
+                self.cfg, generator=self.generator,
+                overfit=int(self.cfg["train"].get("overfit", 0)),
+            )
+        else:
+            self.train_loader = build_dataloader(
+                self.cfg, "train", generator=self.generator,
+                return_indices=self.method.needs_indices,
+                overfit=int(self.cfg["train"].get("overfit", 0)),
+            )
         self.val_loader = build_dataloader(self.cfg, "val", shuffle=False, return_indices=True)
         self._built = True
 

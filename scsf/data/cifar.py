@@ -147,26 +147,47 @@ def _worker_seed(wid):
     torch_seed = seed  # torch worker init seed is handled by torch itself
 
 
-def _open_train_fold(cfg, split: str):
+def _open_train_fold(cfg, split: str, raw: bool = False):
     import torchvision.datasets as tv_ds
     import torchvision.transforms as tv_tr
 
-    norm = _normalize(cfg)
     if split == "train":
-        transform = tv_tr.Compose(
-            [tv_tr.RandomCrop(32, padding=4),
-             tv_tr.RandomHorizontalFlip(),
-             tv_tr.ToTensor(),
-             tv_tr.Normalize(*norm)]
-        )
+        transform = None if raw else get_train_transform(cfg)
     else:
-        transform = tv_tr.Compose([tv_tr.ToTensor(), tv_tr.Normalize(*norm)])
+        transform = None if raw else get_test_transform(cfg)
     root = cfg["data"]["root"]
     if cfg["dataset"] == "cifar10":
         ds = tv_ds.CIFAR10(root=root, train=True, download=cfg["data"].get("download", False), transform=transform)
     else:
         ds = tv_ds.CIFAR100(root=root, train=True, download=cfg["data"].get("download", False), transform=transform)
     return ds
+
+
+def get_train_transform(cfg):
+    """The single source of truth for the training augmentation pipeline.
+
+    Both the primary dataloader and the two-view path apply exactly this
+    Compose (RandomCrop -> RandomHorizontalFlip -> ToTensor -> Normalize).
+    Making it public guarantees views are never improvised on already
+    normalized tensors.
+    """
+    import torchvision.transforms as tv_tr
+
+    norm = _normalize(cfg)
+    return tv_tr.Compose(
+        [tv_tr.RandomCrop(32, padding=4),
+         tv_tr.RandomHorizontalFlip(),
+         tv_tr.ToTensor(),
+         tv_tr.Normalize(*norm)]
+    )
+
+
+def get_test_transform(cfg):
+    """Identity-style eval transform (ToTensor -> Normalize)."""
+    import torchvision.transforms as tv_tr
+
+    norm = _normalize(cfg)
+    return tv_tr.Compose([tv_tr.ToTensor(), tv_tr.Normalize(*norm)])
 
 
 def _open_test_set(cfg):
@@ -224,6 +245,8 @@ __all__ = [
     "build_dataset",
     "build_dataloader",
     "get_split",
+    "get_test_transform",
+    "get_train_transform",
     "split_hashes",
     "TEST_SPLIT_DISABLED",
     "set_test_allowed",

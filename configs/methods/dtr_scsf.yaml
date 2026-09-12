@@ -1,0 +1,59 @@
+default_score: dtr_conf
+method:
+  score: dtr_conf
+  taps: [top_l2, top_l1]
+  probe_role: top_l2
+  warmup_epochs: 0
+  beta: 1.0
+  gamma: 1.0
+  init_meta_weight: 1.0
+  min_meta_weight: 0.0001
+  meta_lr: 0.0001
+  calibrator_hidden_dims: [1024, 512, 256, 128]
+  calibrator_dropout: 0.3
+  kd_T0: 2.0
+  kd_T1: 2.0
+  use_four_state: true
+  use_kd: true
+  use_rc_weights: true
+  kd_all: false
+  kd_correct_probe_only: false
+  random_aux_states: false
+  random_aux_seed: 13
+  wbar_clip_max: null
+meta_lr: 0.0001
+variants:
+  dtr_full:
+    method:
+      use_four_state: true
+      use_kd: true
+      use_rc_weights: true
+  dtr_aux_ce:
+    method:
+      use_four_state: false
+      use_kd: false
+  dtr_state_norepair:
+    method:
+      use_four_state: true
+      use_kd: false
+  dtr_cond_norc:
+    method:
+      use_four_state: true
+      use_kd: true
+      use_rc_weights: false
+  dtr_rev_kd_all:
+    method:
+      use_four_state: true
+      use_kd: true
+      kd_all: true
+  dtr_rev_kd_correct_probe:
+    method:
+      use_four_state: true
+      use_kd: true
+      kd_correct_probe_only: true
+  dtr_rand_states:
+    method:
+      use_four_state: true
+      use_kd: false
+      random_aux_states: true
+citation: DTR-SCSF (review §7 pp.8-11); four-state transition head, (1,0)-conditioned reverse KD, two deterministic views; probe at top_l2, deployment = backbone + head only. Warmup and lambda schedule are adopted unvalidated defaults — see docs/RC_TRAINING_IMPLEMENTATION.md §6.

@@ -11,6 +11,7 @@ from .dg import DeepGamblersMethod
 from .sat import SATMethod
 from .scsf import SCSFMethod
 from .scsf_correctness import SCSFCorrectnessMethod
+from .dtr_scsf import DTRSCSFMethod
 from .selectivenet import SelectiveNetMethod
 from .sage_ds import SageDSMethod
 from .sage_ds_v2 import SageDSV2Method
@@ -48,6 +49,9 @@ for _n, _b in [
     # attached, logits detached), correctly-oriented cosine meta-weight.
     # Distinct class; legacy scsf (TCP-MSE, inverted schedule) is preserved.
     ("scsf_correctness", SCSFCorrectnessMethod),
+    # DTR-SCSF: four-state transition repair with (1,0)-conditioned reverse KD
+    # and a two-view training path (probe excluded from deployment).
+    ("dtr_scsf", DTRSCSFMethod),
     ("ccl_sc", CCLSCMethod),
     ("sage_ds", SageDSMethod),
     # SAGE-DS topology/ablation aliases: all resolve to the same class driven

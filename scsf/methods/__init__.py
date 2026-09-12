@@ -71,6 +71,7 @@ from .scsf import (  # noqa: F401
     meta_weight_cosine,
 )
 from .scsf_correctness import SCSFCorrectnessMethod  # noqa: F401
+from .dtr_scsf import DTRProbe, DTRSCSFMethod  # noqa: F401
 from .scores import (  # noqa: F401
     SCORE_FUNCS,
     compute_scores,
@@ -131,6 +132,8 @@ __all__ = [
     "SoftCell",
     "_soft_target",
     "SCSFCorrectnessMethod",
+    "DTRProbe",
+    "DTRSCSFMethod",
     "msp",
     "entropy",
     "negative_entropy",

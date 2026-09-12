@@ -34,6 +34,7 @@ from scsf.methods.rc_training.rc_weights import (
 )
 from scsf.methods.rc_training.schedules import (
     meta_weight_cosine_decay,
+    phase_fn,
     temperature_schedule,
 )
 from scsf.methods.rc_training.softquantile import (
@@ -80,6 +81,14 @@ def test_temperature_schedule_linear_endpoints():
     assert sched[0] == 1.0 and sched[9] == 4.0
     assert all(b >= a for a, b in zip(sched, sched[1:]))
     assert math.isclose(sched[1], 1.0 + 1.0 / 9.0 * 3.0, rel_tol=1e-12)
+
+
+def test_phase_fn_boundaries():
+    assert phase_fn(0, start_epoch=0, warmup_epochs=3) == "warmup"
+    assert phase_fn(2, 0, 3) == "warmup"
+    assert phase_fn(3, 0, 3) == "joint"
+    assert phase_fn(4, 0, 0) == "joint"
+    assert phase_fn(0, 5, 0) == "pre"           # before the run's start epoch
 
 
 # --------------------------------------------------------------------------

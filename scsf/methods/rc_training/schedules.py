@@ -54,4 +54,20 @@ def temperature_schedule(
     )
 
 
-__all__ = ["meta_weight_cosine_decay", "temperature_schedule"]
+def phase_fn(epoch: int, start_epoch: int, warmup_epochs: int) -> str:
+    """Explicit phase bookkeeping: ``pre`` / ``warmup`` / ``joint``.
+
+    ``start_epoch`` is the first epoch of the run (usually ``0``); the warmup
+    phase spans ``[start_epoch, start_epoch + warmup_epochs)`` and the joint
+    phase starts at ``start_epoch + warmup_epochs``. The phase is a pure
+    function of ``epoch`` (already checkpointed exactly by the trainer), so
+    resume reproduces the phase sequence.
+    """
+    if epoch < int(start_epoch):
+        return "pre"
+    if epoch < int(start_epoch) + int(max(warmup_epochs, 0)):
+        return "warmup"
+    return "joint"
+
+
+__all__ = ["meta_weight_cosine_decay", "phase_fn", "temperature_schedule"]

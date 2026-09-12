@@ -45,6 +45,11 @@ class Method(nn.Module):
     output_offset = 0
     #: does the method require the global training-set index in each batch?
     needs_indices = False
+    #: does the method require a deterministic second view of each train image
+    #: (batch becomes ``(x, v, y, idx)``)? DTR/R3 set this; the trainer routes
+    #: to ``build_two_view_dataloader``. Never changes ``(x, y)`` ordering for
+    #: existing methods.
+    needs_two_views = False
 
     def __init__(self, train_cfg: dict):
         super().__init__()

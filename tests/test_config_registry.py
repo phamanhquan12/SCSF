@@ -153,6 +153,25 @@ def test_method_variant_disambiguates_run_name():
     assert ".cov0.95" not in none_variant["run_name"]
 
 
+def test_dtr_variant_from_yaml_merges_method_subtree():
+    full = config.resolve({"method_name": "dtr_scsf",
+                           "method": {"variant": "dtr_full"}})
+    aux = config.resolve({"method_name": "dtr_scsf",
+                          "method": {"variant": "dtr_aux_ce"}})
+    assert full["method"]["use_kd"] is True and full["method"]["use_four_state"] is True
+    assert aux["method"]["use_kd"] is False and aux["method"]["use_four_state"] is False
+    # inherits non-variant defaults (probe role / calibrator config)
+    assert full["method"]["probe_role"] == "top_l2"
+    assert full["run_name"].endswith("dtr_scsf.dtr_full-rsinglerun-s13")
+    assert aux["run_name"].endswith("dtr_scsf.dtr_aux_ce-rsinglerun-s13")
+    assert full["run_name"] != aux["run_name"]
+
+
+def test_dtr_unknown_variant_raises():
+    with pytest.raises(ValueError):
+        config.resolve({"method_name": "dtr_scsf", "method": {"variant": "nope"}})
+
+
 def test_ccl_sc_reference_recipe_matches_paper_and_dispatches_by_dataset():
     common = {"backbone": "vgg16_bn", "recipe": "ccl_sc_reference"}
     c10 = config.resolve({**common, "dataset": "cifar10", "method_name": "ccl_sc"})

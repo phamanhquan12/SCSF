@@ -156,6 +156,12 @@ def resolve(overrides: dict) -> dict:
     mtd_layer = _load_method_layer(method_name)
     rcp_layer = _load_layer("recipes", recipe)
 
+    # Named variants live in a ``variants:`` mapping of the method YAML; the
+    # selected variant's ``method`` subtree is merged late (after recipe and
+    # dataset-method overrides, before CLI overrides) and never misleads the
+    # run_name, which appends ``.variant`` to disambiguate run dirs.
+    _variants = (mtd_layer.pop("variants", None) or {}) if isinstance(mtd_layer, dict) else {}
+
     cfg = dict(_DEFAULTS)
     cfg.update(ds_layer)
     cfg.update(bb_layer)
@@ -241,6 +247,21 @@ def resolve(overrides: dict) -> dict:
     # such as data.root / train.defaults survive nonzero top-level keys)
     for k, v in overrides.items():
         _deep_merge(cfg, {k: v})
+
+    # Selected named variant: its ``method`` subtree is deep-merged after every
+    # other layer (recipe, dataset-method, YAML default, CLI) so the explicit
+    # variant always wins. Unknown variants hard-fail at resolve time.
+    variant_name = cfg.get("method", {}).get("variant")
+    if variant_name and _variants:
+        vcfg = _variants.get(str(variant_name))
+        if vcfg is None:
+            raise ValueError(
+                f"unknown method variant {variant_name!r} for {method_name!r}; "
+                f"available: {sorted(_variants)}"
+            )
+        vmeth = vcfg.get("method", vcfg)
+        if isinstance(vmeth, dict):
+            _deep_merge(cfg.setdefault("method", {}), vmeth)
 
     # finalize dependent fields
     if cfg["train"].get("device") == "auto":
