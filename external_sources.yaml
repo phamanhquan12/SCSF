@@ -46,7 +46,19 @@ packages:
     license: BSD-3-Clause
     notice: "torchvision notice retained under external_licenses/torchvision.NOTICE."
 
+  - name: fmfp
+    method: fmfp_reference
+    paper: "“Rethinking Confidence Calibration for Failure Prediction”, Zhu, Cheng, Zhang, Liu, ECCV 2022."
+    reference_impl: https://github.com/Impression2805/FMFP
+    license: MIT
+    adaptations:
+      - "SAM two-pass on CE (train_fmfp.py); ranking criterion in main_fmfp.py is unused upstream and is not added here."
+      - "SWA averaging after swa_start=180 on the 300-epoch shared recipe (analogue of official 120/201)."
+      - "Shared ccl_sc_reference step LR is retained (official used CosineAnnealingLR + SWALR)."
+      - "Deployment applies a train-loader BN refresh on the selected SWA snapshot."
+
 notices:
+  - external_licenses/fmfp.LICENSE
   - external_licenses/selectivenet.LICENSE
   - external_licenses/self-adaptive-training.LICENSE
   - external_licenses/ccl-sc.LICENSE

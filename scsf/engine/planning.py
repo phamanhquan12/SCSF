@@ -1,29 +1,25 @@
-"""Torch-free plan replica (spec §10.3 #1; commit 6).
+"""Torch-free plan identities (suites, method ids, variants).
 
-Single source of truth for the portable launcher's **plan** layer.  The engine
-resolver (``scsf/engine/config.py``) must stay torch-free too, but it carries
-the whole train/eval recipe; this module holds only the cell-identity layer —
-method ids, exact suite ids, variants, run naming, config hash — and nothing
-else.  It is deliberately **torch-free by construction** (pure stdlib +
-``yaml``), so the launcher's ``--dry-run`` plan path never triggers a CUDA
-init, a dataset download, a process launch, or a torch import (§10.3 #1).
-
-Parity (run name + config hash) between this replica and the engine resolver
-is locked by ``tests/test_launcher.py::test_run_name_config_hash_parity`` and
-``tests/test_plan_engine_hash_parity`` (commit-7 GPU-gate only; the sha256 for
-config_hash is reproduced from the engine's own ``config_hash`` in
-``scsf/engine/registry.py``).
+Cell identity (run_name, scientific_hash, comparison_signature) is computed
+by ``scsf.engine.config`` — the same resolver the trainer uses. This module
+does not keep a drifting hash replica. Importing it must not load torch or
+numpy (engine/__init__.py is lazy; config.py is stdlib + yaml).
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 
-# method_id -> (method_name, variant-or-None).  Suite rows (§10.2) resolve
-# through this and never through a silent guess: an id absent here is a hard
-# capability error, printed before a single job is scheduled (§10.3 #2).
+from scsf.engine.config import (  # noqa: F401
+    comparison_signature,
+    config_hash,
+    resolve,
+    run_name_for,
+    scientific_hash,
+)
+
+# method_id -> (method_name, variant-or-None). Suite rows resolve through this
+# and never through a silent guess.
 METHOD_VARIANTS = {
     "ce":                               ("ce", None),
     "scsf_correctness":                 ("scsf_correctness", None),
@@ -33,7 +29,15 @@ METHOD_VARIANTS = {
     "sage_ds_v2":                       ("sage_ds_v2", None),
     "sage_topk_v2_fixedk2_pool":        ("sage_topk", "v2_fixedk2_pool"),
     "sage_topk_v2_fixedk2_pool_conv":   ("sage_topk", "v2_fixedk2_pool_conv"),
-    # Ablation ladder ids (§10.2): never silently part of `all`.
+    "fmfp_reference":                   ("fmfp_reference", None),
+    "crossfit_failure":                 ("crossfit_failure", None),
+    "candidate_verify":                 ("candidate_verify", None),
+    "intervention_rank":                ("intervention_rank", None),
+    "neighbor_distill":                 ("neighbor_distill", None),
+    "rank_sharpness":                   ("rank_sharpness", None),
+    "ce.fold_teacher_a":                ("ce", "fold_teacher_a"),
+    "ce.fold_teacher_b":                ("ce", "fold_teacher_b"),
+    # Ablation ladder ids: never silently part of `all`.
     "r3_full":              ("r3_scsf", "r3_full"),
     "r3_uniform_rank":      ("r3_scsf", "r3_uniform_rank"),
     "r3_rc_rank":           ("r3_scsf", "r3_rc_rank"),
@@ -57,19 +61,29 @@ METHOD_VARIANTS = {
     "cbr_groupdro":         ("cbr_scsf", "cbr_groupdro"),
 }
 
-# §10.2 exact primary suites.  `_PRIMARY` lists are the lock; `all` is the
-# deduplicated union review ∪ sage = 8 ids and is derived *after* the primary
-# literals exist (building it inside the same literal would reference
-# DEFAULT_SUITES while it is still being constructed -> NameError).
 _PRIMARY = {
     "review": ["ce", "scsf_correctness", "r3_scsf", "dtr_scsf", "cbr_scsf"],
     "sage": ["ce", "sage_ds_v2", "sage_topk_v2_fixedk2_pool",
              "sage_topk_v2_fixedk2_pool_conv"],
+    "next5_pilot": [
+        "ce",
+        "ce.fold_teacher_a",
+        "ce.fold_teacher_b",
+        "scsf_correctness",
+        "sage_ds_v2",
+        "fmfp_reference",
+        "candidate_verify",
+        "intervention_rank",
+        "rank_sharpness",
+        "crossfit_failure",
+        "neighbor_distill",
+    ],
 }
 DEFAULT_SUITES = {
     "review": _PRIMARY["review"],
     "sage": _PRIMARY["sage"],
     "all": sorted(set(_PRIMARY["review"]).union(_PRIMARY["sage"])),
+    "next5_pilot": _PRIMARY["next5_pilot"],
     "r3_ablations": [i for i, _ in METHOD_VARIANTS.items()
                      if METHOD_VARIANTS[i][0] == "r3_scsf" and
                      METHOD_VARIANTS[i][1] not in (None, "r3_full")],
@@ -87,12 +101,19 @@ SUITE_ALIASES = {
     "ce": "review",
     "sage": "sage", "topk": "sage", "sage_topk": "sage",
     "all": "all", "full": "all",
+    "next5_pilot": "next5_pilot", "next5": "next5_pilot",
     "r3_ablations": "r3_ablations", "dtr_ablations": "dtr_ablations",
     "cbr_ablations": "cbr_ablations",
 }
 PLAN_ARTIFACT_ROOT = os.path.join(os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
     "plans")
+
+# Fold teachers exclude this fold id (train on the complement).
+FOLD_TEACHER_EXCLUDE = {
+    "fold_teacher_a": 0,
+    "fold_teacher_b": 1,
+}
 
 
 def _variant_of(pid: str) -> tuple[str, str | None]:
@@ -104,21 +125,3 @@ def _variant_of(pid: str) -> tuple[str, str | None]:
 
 def _rows_for_method(pid: str) -> tuple[str, str | None]:
     return _variant_of(pid)
-
-
-def run_name_for(cfg: dict) -> str:
-    """Portable run-name replica (§10.4 #§10.3): dataset-backbone-method.
-
-    Matches the engine's ``run_name_for`` cell identity: the variant string
-    (when present) is folded in so pool vs pool_conv and every ablation ladder
-    cell gets its own non-colliding run name.
-    """
-    name = f"{cfg['dataset']}-{cfg['backbone']}-{cfg['method_name']}"
-    if cfg.get("variant"):
-        name += f".{cfg['variant']}"
-    return f"{name}-r{cfg['recipe']}-s{cfg['seed']}"
-
-
-def config_hash(cfg: dict) -> str:
-    payload = json.dumps(cfg, sort_keys=True, default=str)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()

@@ -1,0 +1,13 @@
+extends: scsf_correctness
+default_score: scsf_corr
+method:
+  score: scsf_corr
+  lambda_rank: 0.5
+  margin: 0.0
+  rho: 0.05
+  cover_lo: 0.8
+  cover_hi: 1.0
+  max_err: 32
+  max_corr: 32
+  control: sharpness
+citation: "NEXT5 rank_sharpness — ranking-loss-directed first-order perturbation, one optimizer update. Protocol: docs/NEXT5_PROTOCOL.md."

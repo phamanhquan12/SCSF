@@ -170,6 +170,86 @@ def worst_class_aurc(labels, predictions, confidence, ids=None, num_classes=None
     return float(max(finite))
 
 
+def partial_prefix_aurc(labels, predictions, confidence, ids=None,
+                        lo: float = 0.8, hi: float = 1.0) -> float:
+    """Mean prefix risk over coverages ``k/N ∈ [lo, hi]`` (endpoints included).
+
+    Finite-sample convention for the NEXT5 operating window. Empty window
+    (no prefix in range) returns NaN, never a fabricated number.
+    """
+    cov, risk = risk_coverage_curve(labels, predictions, confidence, ids)
+    mask = (cov + 1e-15 >= float(lo)) & (cov - 1e-15 <= float(hi))
+    if not np.any(mask):
+        return float("nan")
+    return float(np.mean(risk[mask]))
+
+
+def partial_excess_aurc(labels, predictions, confidence, ids=None,
+                        lo: float = 0.8, hi: float = 1.0) -> float:
+    """Partial AURC minus the oracle prefix-AURC on the same k-window."""
+    n = len(np.asarray(labels).reshape(-1))
+    if n == 0:
+        return float("nan")
+    err = errors(labels, predictions)
+    e = int(err.sum())
+    cov, risk = risk_coverage_curve(labels, predictions, confidence, ids)
+    mask = (cov + 1e-15 >= float(lo)) & (cov - 1e-15 <= float(hi))
+    if not np.any(mask):
+        return float("nan")
+    k = np.arange(1, n + 1, dtype=float)
+    opt_risk = np.maximum(0.0, k - (n - e)) / k
+    return float(np.mean(risk[mask]) - np.mean(opt_risk[mask]))
+
+
+def class_metrics_at_global_coverages(labels, predictions, confidence, ids=None,
+                                      num_classes=None, coverages=None):
+    """Per-class coverage/risk at the same GLOBAL confidence thresholds.
+
+    For each grid coverage q, accept the global top-k and report, per class:
+    support, accepted count, coverage (accepted/support), risk among accepted,
+    and the accepted confusion matrix over the whole accepted set.
+    """
+    coverages = list(COVERAGE_GRID_PERCENT if coverages is None else coverages)
+    labels = np.asarray(labels).reshape(-1)
+    predictions = np.asarray(predictions).reshape(-1)
+    n = len(labels)
+    num_classes = int(labels.max()) + 1 if num_classes is None else int(num_classes)
+    err = errors(labels, predictions)
+    order = stable_confidence_order(confidence, ids, n)
+    out = []
+    for q in coverages:
+        k = max(1, int(np.floor(q * n / 100.0)))
+        k = min(k, n)
+        keep = order[:k]
+        y_k = labels[keep]
+        p_k = predictions[keep]
+        e_k = err[keep]
+        per_class = {}
+        for c in range(num_classes):
+            support = int((labels == c).sum())
+            acc_c = int((y_k == c).sum())
+            acc_err = int(((y_k == c) & (e_k == 1)).sum())
+            per_class[int(c)] = {
+                "support": support,
+                "accepted": acc_c,
+                "coverage": (float(acc_c) / support) if support else float("nan"),
+                "risk": (float(acc_err) / acc_c) if acc_c else float("nan"),
+                "accepted_errors": acc_err,
+            }
+        cm = np.zeros((num_classes, num_classes), dtype=int)
+        for yi, pi in zip(y_k, p_k):
+            if 0 <= int(yi) < num_classes and 0 <= int(pi) < num_classes:
+                cm[int(yi), int(pi)] += 1
+        out.append({
+            "coverage": int(q),
+            "k": int(k),
+            "n": int(n),
+            "per_class": per_class,
+            "accepted_confusion": cm.tolist(),
+        })
+    return out
+
+
 def all_metrics(labels, predictions, confidence, ids=None, num_classes=None):
     """Convenience bundle of every metric the evaluator reports."""
     labels = np.asarray(labels).reshape(-1)
@@ -185,6 +265,10 @@ def all_metrics(labels, predictions, confidence, ids=None, num_classes=None):
         "auroc_error": auroc_error(labels, predictions, confidence, ids),
         "aupr_error": aupr_error(labels, predictions, confidence, ids),
         "excess_aurc": excess_aurc(labels, predictions, confidence, ids),
+        "partial_aurc_80_100": partial_prefix_aurc(
+            labels, predictions, confidence, ids, 0.8, 1.0),
+        "partial_excess_aurc_80_100": partial_excess_aurc(
+            labels, predictions, confidence, ids, 0.8, 1.0),
         "mean_class_aurc": float(np.nanmean(list(pc.values()))),
         "worst_class_aurc": worst_class_aurc(labels, predictions, confidence, ids, num_classes),
         "per_class_aurc": {int(k): float(v) for k, v in pc.items()},

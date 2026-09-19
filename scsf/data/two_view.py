@@ -81,11 +81,11 @@ def build_two_view_dataloader(
     if num_workers is None:
         num_workers = int(cfg["data"].get("num_workers", 4))
 
-    from .cifar import get_split
+    from .cifar import get_split, get_effective_train_indices
 
     split_spec = get_split(cfg)
     ds = _IndexSubset(_open_train_fold(cfg, "train", raw=True),
-                      split_spec.train_indices)
+                      get_effective_train_indices(cfg, split_spec))
     if overfit and overfit > 0:
         ds = _IndexSubset(ds.base, ds.indices[: int(overfit)])
     ds = PairedViewDataset(

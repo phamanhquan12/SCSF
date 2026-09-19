@@ -202,6 +202,120 @@ def split_hashes(split: SplitSpec) -> dict:
     }
 
 
+FOLD_SEED = SPLIT_SEED
+N_TRAIN_FOLDS = 2
+
+
+def class_of_official_index(dataset: str, index: int) -> int:
+    """Locked class identity used by the stratified split (block layout)."""
+    layout = DATASET_LAYOUT[dataset]
+    return int(index) // int(layout["per_class"])
+
+
+def make_stratified_train_folds(
+    dataset: str,
+    train_indices: Sequence[int],
+    n_folds: int = N_TRAIN_FOLDS,
+    seed: int = FOLD_SEED,
+) -> List[List[int]]:
+    """Partition TRAIN IDs into ``n_folds`` stratified folds (no val leakage).
+
+    Class identity is the same ``index // per_class`` convention as
+    ``make_stratified_split``. Folds are disjoint, cover ``train_indices``
+    exactly, and are serialized with SHA-256 hashes.
+    """
+    if n_folds < 2:
+        raise ValueError("n_folds must be >= 2")
+    layout = DATASET_LAYOUT[dataset]
+    num_classes = layout["num_classes"]
+    by_class: List[List[int]] = [[] for _ in range(num_classes)]
+    for i in train_indices:
+        by_class[class_of_official_index(dataset, i)].append(int(i))
+    folds: List[List[int]] = [[] for _ in range(n_folds)]
+    for c, idxs in enumerate(by_class):
+        rng = random.Random(int(seed) * 1_000_019 + c + 17)
+        shuf = list(idxs)
+        rng.shuffle(shuf)
+        for j, idx in enumerate(shuf):
+            folds[j % n_folds].append(int(idx))
+    for fold in folds:
+        fold.sort()
+    flat = [i for fold in folds for i in fold]
+    if len(flat) != len(set(flat)):
+        raise ValueError("fold construction produced duplicate IDs")
+    if set(flat) != set(int(i) for i in train_indices):
+        raise ValueError("folds do not cover the train split exactly")
+    return folds
+
+
+def fold_hash_of(indices: Sequence[int]) -> str:
+    return split_hash_of(indices)
+
+
+def serialize_train_folds(
+    directory: str,
+    dataset: str,
+    folds: Sequence[Sequence[int]],
+    seed: int = FOLD_SEED,
+) -> str:
+    """Write JSON fold file; return path."""
+    import json
+
+    os.makedirs(directory, exist_ok=True)
+    n_folds = len(folds)
+    name = f"{dataset}_train_folds_n{n_folds}_seed{int(seed)}.json"
+    path = os.path.join(directory, name)
+    payload = {
+        "schema": "scsf.train_folds_v1",
+        "dataset": dataset,
+        "n_folds": n_folds,
+        "seed": int(seed),
+        "split_seed": SPLIT_SEED,
+        "folds": [list(map(int, f)) for f in folds],
+        "hashes": [fold_hash_of(f) for f in folds],
+        "sizes": [len(f) for f in folds],
+    }
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+    return path
+
+
+def load_train_folds(directory: str, dataset: str, n_folds: int = N_TRAIN_FOLDS,
+                     seed: int = FOLD_SEED) -> dict:
+    import json
+
+    name = f"{dataset}_train_folds_n{n_folds}_seed{int(seed)}.json"
+    path = os.path.join(directory, name)
+    with open(path) as f:
+        data = json.load(f)
+    if data.get("schema") != "scsf.train_folds_v1":
+        raise ValueError(f"unexpected fold schema in {path}")
+    if int(data.get("n_folds", -1)) != int(n_folds):
+        raise ValueError(f"fold n_folds mismatch in {path}")
+    if int(data.get("seed", -1)) != int(seed):
+        raise ValueError(f"fold seed mismatch in {path}")
+    return data
+
+
+def load_or_make_train_folds(directory: str, dataset: str, train_indices,
+                             n_folds: int = N_TRAIN_FOLDS,
+                             seed: int = FOLD_SEED) -> dict:
+    name = f"{dataset}_train_folds_n{n_folds}_seed{int(seed)}.json"
+    path = os.path.join(directory, name)
+    if os.path.exists(path):
+        data = load_train_folds(directory, dataset, n_folds=n_folds, seed=seed)
+        # Integrity: stored IDs must match the current train split.
+        stored = [i for fold in data["folds"] for i in fold]
+        if set(map(int, stored)) != set(int(i) for i in train_indices):
+            raise ValueError(
+                f"stored train folds in {path} do not match current train IDs"
+            )
+        return data
+    folds = make_stratified_train_folds(dataset, train_indices, n_folds, seed)
+    serialize_train_folds(directory, dataset, folds, seed=seed)
+    return load_train_folds(directory, dataset, n_folds=n_folds, seed=seed)
+
+
 def assert_no_official_test_leakage(split: SplitSpec) -> None:
     """Assert every split index belongs to the official training set.
 

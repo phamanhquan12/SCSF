@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scsf"
+version = "0.1.0"
+description = "Selective-classification harness and SCSF methods"
+requires-python = ">=3.10"
+dependencies = ["pyyaml"]
+
+[project.optional-dependencies]
+train = ["torch", "torchvision", "numpy", "timm"]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["scsf*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

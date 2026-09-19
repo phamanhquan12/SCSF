@@ -34,6 +34,12 @@ def logit_margin(logits):
     return top2[:, 0] - top2[:, 1]
 
 
+def normalized_logit(logits):
+    """Max entry of ℓ2-normalized logits (Cattelan-style control)."""
+    denom = torch.linalg.vector_norm(logits, ord=2, dim=1).clamp_min(1e-12)
+    return (logits / denom.unsqueeze(1)).max(dim=1).values
+
+
 def tcp(logits, targets):
     """True-class probability (softmax of the true class), detached."""
     with torch.no_grad():
@@ -46,6 +52,7 @@ SCORE_FUNCS = {
     "entropy": negative_entropy,
     "energy": energy,
     "logit_margin": logit_margin,
+    "normalized_logit": normalized_logit,
 }
 
 

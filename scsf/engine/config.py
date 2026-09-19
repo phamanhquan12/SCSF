@@ -27,7 +27,8 @@ import os
 import sys
 from copy import deepcopy
 
-from .seeding import _DEFAULT
+# Torch-free: do not import seeding (numpy/torch) at module import.
+_DEFAULT = {"seed": 13, "torch_threads": 4}
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CONFIG_ROOT = os.path.join(_ROOT, "configs")
@@ -37,6 +38,15 @@ _DEFAULTS = {
     "results_root": "results",
     "torch_threads": _DEFAULT["torch_threads"],
 }
+
+# Runtime keys stripped from scientific_hash / comparison_signature so a
+# plan-time resolve (device=auto, host data root) matches execute-time cfg.
+_RUNTIME_TOP = ("device", "results_root", "run_name")
+_RUNTIME_TRAIN = ("device",)
+_RUNTIME_DATA = ("root", "num_workers", "split_index_dir")
+# Artifact locators are host paths under results_root; identity is the
+# construction (folds, CE anchor), not the absolute file path.
+_RUNTIME_METHOD = ("oof_path", "memory_path")
 
 _DATASET_DEFAULT = {
     "cifar10": {"num_classes": 10, "split_seed": 20260902, "n_train": 45000, "n_val": 5000},
@@ -144,8 +154,36 @@ def overrides_from_cli(argv=None):
     return out
 
 
-def resolve(overrides: dict) -> dict:
-    """Resolve layered config into the canonical engine/method cfg."""
+def _promote_launcher_keys(overrides: dict) -> dict:
+    """Copy top-level ``seed`` / ``variant`` into the nested schema.
+
+    The portable launcher and some tests pass these at the top level; the
+    engine's run_name and training loop read ``train.seed`` and
+    ``method.variant``. Promotion is setdefault-only so an explicit nested
+    value still wins.
+    """
+    out = dict(overrides)
+    seed = out.get("seed")
+    if seed is not None:
+        train_ov = dict(out.get("train") or {})
+        train_ov.setdefault("seed", int(seed) if not isinstance(seed, bool) else seed)
+        train_ov.setdefault("data_order_seed", train_ov["seed"])
+        out["train"] = train_ov
+    variant = out.get("variant")
+    if variant is not None:
+        method_ov = dict(out.get("method") or {})
+        method_ov.setdefault("variant", variant)
+        out["method"] = method_ov
+    return out
+
+
+def resolve(overrides: dict, resolve_device: bool = True) -> dict:
+    """Resolve layered config into the canonical engine/method cfg.
+
+    ``resolve_device=False`` leaves ``train.device`` as ``auto`` and never
+    imports torch. Plan-only launchers must use that path.
+    """
+    overrides = _promote_launcher_keys(overrides)
     dataset = str(overrides.get("dataset", "cifar10"))
     backbone = str(overrides.get("backbone", "resnet18"))
     method_name = str(overrides.get("method_name", overrides.get("method", "ce")))
@@ -211,6 +249,8 @@ def resolve(overrides: dict) -> dict:
                     {"mean": [0.4914, 0.4822, 0.4465], "std": [0.2470, 0.2435, 0.2616]})
     data.setdefault("num_workers", 4)
     data.setdefault("download", False)
+    data.setdefault("official_train_size", 50000)
+    data.setdefault("n_folds", 2)
     data.setdefault("split_index_dir", os.path.join(cfg.get("results_root", "results"), "splits"))
     data.setdefault("use_serialized_splits", True)
     cfg["data"] = data
@@ -264,7 +304,7 @@ def resolve(overrides: dict) -> dict:
             _deep_merge(cfg.setdefault("method", {}), vmeth)
 
     # finalize dependent fields
-    if cfg["train"].get("device") == "auto":
+    if resolve_device and cfg["train"].get("device") == "auto":
         import torch
         cfg["train"]["device"] = "cuda" if torch.cuda.is_available() else "cpu"
     cfg.setdefault("run_name", run_name_for(cfg))
@@ -294,3 +334,63 @@ def config_hash(cfg: dict) -> str:
     """Canonical SHA-256 over the fully resolved config (manifest/registry)."""
     payload = json.dumps(cfg, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _identity_view(cfg: dict) -> dict:
+    """Deep-copy cfg with runtime/host keys removed (scientific identity)."""
+    view = deepcopy(cfg)
+    for k in _RUNTIME_TOP:
+        view.pop(k, None)
+    train = dict(view.get("train") or {})
+    for k in _RUNTIME_TRAIN:
+        train.pop(k, None)
+    if train:
+        view["train"] = train
+    data = dict(view.get("data") or {})
+    for k in _RUNTIME_DATA:
+        data.pop(k, None)
+    if data:
+        view["data"] = data
+    method = dict(view.get("method") or {})
+    for k in _RUNTIME_METHOD:
+        method.pop(k, None)
+    if method:
+        view["method"] = method
+    return view
+
+
+def scientific_hash(cfg: dict) -> str:
+    """Run hash: scientific config including seed, excluding host/runtime paths.
+
+    Identifies a specific run. Device and data-root differences do not change
+    it, so a plan-time row matches the execute-time child.
+    """
+    payload = json.dumps(_identity_view(cfg), sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def comparison_signature(cfg: dict, source_sha: str = "") -> str:
+    """Group intended seeds while preserving variant/source/recipe identity.
+
+    Excludes seed / data_order_seed. Does **not** collapse two variants that
+    happen to share a factory class, and does **not** split one intended cell
+    merely because per-seed run hashes differ.
+    """
+    ident = _identity_view(cfg)
+    train = dict(ident.get("train") or {})
+    train.pop("seed", None)
+    train.pop("data_order_seed", None)
+    payload = {
+        "dataset": ident.get("dataset"),
+        "backbone": ident.get("backbone"),
+        "method_name": ident.get("method_name"),
+        "variant": (ident.get("method") or {}).get("variant"),
+        "recipe": ident.get("recipe"),
+        "method": ident.get("method"),
+        "train": train,
+        "data_num_classes": (ident.get("data") or {}).get("num_classes"),
+        "data_split_seed": (ident.get("data") or {}).get("split_seed"),
+        "source_sha": str(source_sha or ""),
+    }
+    blob = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()

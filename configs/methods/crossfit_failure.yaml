@@ -1,0 +1,10 @@
+extends: scsf_correctness
+default_score: scsf_corr
+method:
+  score: scsf_corr
+  lambda_difficulty: 0.3
+  difficulty_hidden: 128
+  head_seed_offset: 10001
+  control: oof
+  oof_path: null
+citation: "NEXT5 crossfit_failure — excluded-fold teacher-error BCE into a training-only difficulty head; deployed score is scsf_corr. Protocol: docs/NEXT5_PROTOCOL.md."

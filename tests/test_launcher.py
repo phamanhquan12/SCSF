@@ -30,35 +30,34 @@ def test_launcher_compiles():
 
 
 def test_planning_replica_standalone_and_hash_distinct():
-    p = _planning()
-    base = {"dataset": "cifar10", "backbone": "resnet18",
-            "method_name": "sage_topk", "variant": "v2_fixedk2_pool",
-            "score": "msp", "recipe": "single_run", "seed": 13}
-    other = dict(base, variant="v2_fixedk2_pool_conv")
-    # pool vs pool_conv must never fold to the same run_name/config hash.
-    assert p.run_name_for(base) != p.run_name_for(other)
-    assert p.config_hash(base) != p.config_hash(other)
+    from scsf.engine.config import resolve, run_name_for, scientific_hash
+    a = resolve({"dataset": "cifar10", "backbone": "resnet18",
+                 "method_name": "sage_topk", "method": {"variant": "v2_fixedk2_pool"},
+                 "recipe": "singlerun", "train": {"seed": 13}}, resolve_device=False)
+    b = resolve({"dataset": "cifar10", "backbone": "resnet18",
+                 "method_name": "sage_topk", "method": {"variant": "v2_fixedk2_pool_conv"},
+                 "recipe": "singlerun", "train": {"seed": 13}}, resolve_device=False)
+    assert run_name_for(a) != run_name_for(b)
+    assert scientific_hash(a) != scientific_hash(b)
 
 
 def test_suites_exact_row_counts():
-    p = _planning()
-    # §10.2: review=5, sage=4, all=dedup union=8.
-    assert len(p.DEFAULT_SUITES["review"]) == 5
-    assert len(p.DEFAULT_SUITES["sage"]) == 4
-    assert len(p.DEFAULT_SUITES["all"]) == 8
-    assert sorted(p.DEFAULT_SUITES["all"]) == sorted(
-        set(p.DEFAULT_SUITES["review"]) | set(p.DEFAULT_SUITES["sage"]))
-    # ablations never silently part of `all`.
-    union = set(p.DEFAULT_SUITES["review"]) | set(p.DEFAULT_SUITES["sage"])
+    from scsf.engine.planning import DEFAULT_SUITES
+    assert len(DEFAULT_SUITES["review"]) == 5
+    assert len(DEFAULT_SUITES["sage"]) == 4
+    assert len(DEFAULT_SUITES["all"]) == 8
+    assert sorted(DEFAULT_SUITES["all"]) == sorted(
+        set(DEFAULT_SUITES["review"]) | set(DEFAULT_SUITES["sage"]))
+    union = set(DEFAULT_SUITES["review"]) | set(DEFAULT_SUITES["sage"])
     for k in ("r3_ablations", "dtr_ablations", "cbr_ablations"):
-        assert set(p.DEFAULT_SUITES[k]).isdisjoint(union)
+        assert set(DEFAULT_SUITES[k]).isdisjoint(union)
+    assert len(DEFAULT_SUITES["next5_pilot"]) == 11
 
 
 def test_sage_topk_variants_fold_distinct():
-    # §10.2: the two TopK fixed-K=2 ids share one class but never one cell.
-    p = _planning()
-    assert "sage_topk_v2_fixedk2_pool" in p.METHOD_VARIANTS
-    m = p.METHOD_VARIANTS["sage_topk_v2_fixedk2_pool"]
+    from scsf.engine.planning import METHOD_VARIANTS, METHODS
+    assert "sage_topk_v2_fixedk2_pool" in METHOD_VARIANTS
+    m = METHOD_VARIANTS["sage_topk_v2_fixedk2_pool"]
     assert m[0] == "sage_topk"
-    assert p.METHOD_VARIANTS["sage_topk_v2_fixedk2_pool_conv"] != m
-    assert p.METHODS == sorted({x[0] for x in p.METHOD_VARIANTS.values()})
+    assert METHOD_VARIANTS["sage_topk_v2_fixedk2_pool_conv"] != m
+    assert METHODS == sorted({x[0] for x in METHOD_VARIANTS.values()})

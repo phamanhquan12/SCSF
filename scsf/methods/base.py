@@ -109,6 +109,35 @@ class Method(nn.Module):
         """
         return None
 
+    def after_backward(self, loss_items: Dict[str, torch.Tensor], state) -> None:
+        """Run after ``backward`` and before ``optimizer.step`` (default no-op)."""
+        return None
+
+    def on_train_end(self, trainer) -> None:
+        """Finalization after the last epoch (SWA BN refresh, etc.)."""
+        return None
+
+    def run_step(self, batch, state, optimizers) -> Dict[str, torch.Tensor]:
+        """Default update: one forward, one backward, one optimizer step.
+
+        Methods that need a two-pass perturbation (FMFP SAM, rank-sharpness)
+        override this and still perform exactly one parameter update.
+        """
+        loss_dict = self.train_loss(batch, state)
+        total = None
+        for value in loss_dict.values():
+            if torch.is_tensor(value) and value.requires_grad:
+                total = value if total is None else total + value
+        for opt in optimizers:
+            opt.zero_grad(set_to_none=True)
+        if total is not None:
+            total.backward()
+            self.after_backward(loss_dict, state)
+            for opt in optimizers:
+                opt.step()
+        self.after_step(loss_dict, state)
+        return loss_dict
+
     def on_epoch_start(self, epoch: int) -> None:
         return None
 

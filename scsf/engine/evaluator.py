@@ -15,7 +15,12 @@ import torch
 
 from ..data.cifar import TEST_SPLIT_DISABLED, build_dataloader, set_test_allowed
 from ..methods import build_method
-from ..metrics import all_metrics, selective_risk_at_coverages
+from ..methods.scores import logit_margin, msp, negative_entropy, normalized_logit
+from ..metrics import (
+    all_metrics,
+    class_metrics_at_global_coverages,
+    selective_risk_at_coverages,
+)
 from .checkpoint import CheckpointManager
 from .registry import BASE_COLUMNS, append_rows
 
@@ -96,6 +101,7 @@ def evaluate_run(run_dir: str, split: str = "val", checkpoint: str = "selected",
 def _score_split(cfg, method, run_dir, split, dev, append, manifest, manager, checkpoint):
     import time
     labels, preds, confs, ids = [], [], [], []
+    score_bank = {}
     loader = build_dataloader(cfg, split, shuffle=False, return_indices=split != "test")
     with torch.no_grad():
         for batch in loader:
@@ -104,18 +110,71 @@ def _score_split(cfg, method, run_dir, split, dev, append, manifest, manager, ch
             labels.append(np.asarray(y))
             preds.append(mp.prediction.detach().cpu().numpy())
             confs.append(mp.confidence.detach().cpu().numpy())
+            logits = mp.logits
+            extras = {
+                "msp": msp(logits),
+                "logit_margin": logit_margin(logits),
+                "entropy": negative_entropy(logits),
+                "normalized_logit": normalized_logit(logits),
+            }
+            merged = dict(extras)
+            merged.update(mp.scores)
+            for name, tensor in merged.items():
+                score_bank.setdefault(name, []).append(
+                    tensor.detach().cpu().numpy().reshape(-1)
+                )
             if split != "test":
                 ids.append(np.asarray(batch[2]))
     labels = np.concatenate(labels)
     id_arr = np.concatenate(ids) if ids else np.arange(len(labels))
-    metrics = all_metrics(labels, np.concatenate(preds), np.concatenate(confs),
-                          id_arr, cfg["data"]["num_classes"])
-    for c in selective_risk_at_coverages(labels, np.concatenate(preds), np.concatenate(confs), id_arr):
+    pred_arr = np.concatenate(preds)
+    conf_arr = np.concatenate(confs)
+    metrics = all_metrics(labels, pred_arr, conf_arr, id_arr, cfg["data"]["num_classes"])
+    for c in selective_risk_at_coverages(labels, pred_arr, conf_arr, id_arr):
         metrics[f"risk_at_cov_{int(c['coverage'])}"] = float(c["risk"])
+    metrics["class_at_global"] = class_metrics_at_global_coverages(
+        labels, pred_arr, conf_arr, id_arr, cfg["data"]["num_classes"]
+    )
 
-    out = {"split": split, "checkpoint": checkpoint, "metrics": metrics}
+    per_score = {}
+    stacked = {}
+    for name, parts in score_bank.items():
+        s = np.concatenate(parts)
+        stacked[name] = s
+        sm = all_metrics(labels, pred_arr, s, id_arr, cfg["data"]["num_classes"])
+        for c in selective_risk_at_coverages(labels, pred_arr, s, id_arr):
+            sm[f"risk_at_cov_{int(c['coverage'])}"] = float(c["risk"])
+        per_score[name] = sm
+
+    err = (pred_arr != labels).astype(int)
+    order = np.lexsort((id_arr, -conf_arr))
+    top_err = []
+    for rank, idx in enumerate(order, start=1):
+        if err[idx]:
+            top_err.append({"rank": int(rank), "id": int(id_arr[idx]),
+                            "confidence": float(conf_arr[idx])})
+            if len(top_err) >= 50:
+                break
+
+    out = {
+        "split": split,
+        "checkpoint": checkpoint,
+        "primary_score": cfg.get("method", {}).get("score", ""),
+        "metrics": metrics,
+        "per_score": per_score,
+        "top_confidence_errors": top_err,
+        "n_ties": int(len(conf_arr) - len(np.unique(np.round(conf_arr, 6)))),
+    }
     with open(os.path.join(run_dir, f"eval_{split}.json"), "w") as f:
         json.dump(out, f, indent=2, sort_keys=True, default=float)
+    with open(os.path.join(run_dir, f"eval_{split}_all_scores.json"), "w") as f:
+        json.dump({"split": split, "checkpoint": checkpoint, "per_score": per_score},
+                  f, indent=2, sort_keys=True, default=float)
+    np.savez_compressed(
+        os.path.join(run_dir, f"predictions_{split}.npz"),
+        ids=id_arr, labels=labels, predictions=pred_arr, confidence=conf_arr,
+        **{f"score_{k}": v for k, v in stacked.items()},
+    )
 
     if append:
         row = _registry_row(cfg, manifest, split, metrics,

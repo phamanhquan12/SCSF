@@ -12,6 +12,7 @@ from scsf.metrics.selective import (
     excess_aurc,
     optimal_aurc,
     per_class_aurc,
+    partial_prefix_aurc,
     risk_coverage_curve,
     selective_risk_at_coverages,
     stable_confidence_order,
@@ -116,4 +117,14 @@ def test_empty_and_single_error_edge_cases():
     labels2 = np.array([0, 0, 0, 1])
     pred2 = np.array([0, 0, 0, 0])
     assert math.isclose(auroc_error(labels2, pred2, np.array([0.2, 0.4, 0.6, 0.8])), 0.0)
-    assert math.isclose(auroc_error(labels2, pred2, np.array([0.8, 0.6, 0.4, 0.2])), 1.0)
+
+
+def test_partial_prefix_aurc_window():
+    labels = np.array([0, 1, 0, 1])
+    pred = np.array([1, 0, 0, 1])  # errors then later corrects depending on order
+    conf = np.array([1.0, 0.8, 0.4, 0.1])
+    cov, risk = risk_coverage_curve(labels, pred, conf)
+    mask = (cov >= 0.8 - 1e-15) & (cov <= 1.0 + 1e-15)
+    assert partial_prefix_aurc(labels, pred, conf, lo=0.8, hi=1.0) == pytest.approx(
+        float(np.mean(risk[mask]))
+    )

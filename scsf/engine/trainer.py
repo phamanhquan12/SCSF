@@ -25,7 +25,7 @@ from ..version import __version__, package_versions
 from .checkpoint import CheckpointManager, SelectionTracker, _build_scheduler
 from .seeding import capture_global_state, make_generator, restore_global_state, seed_all
 from .registry import BASE_COLUMNS
-from .config import config_hash
+from .config import config_hash, scientific_hash
 
 
 def _build_optimizers(method, cfg):
@@ -56,6 +56,20 @@ def _build_optimizers(method, cfg):
             adamw_base.pop("momentum", None)
             adamw_base["betas"] = (float(spec.get("momentum", 0.9)), 0.999)
             opts.append(torch.optim.AdamW(params, **adamw_base))
+        elif kind == "sam_sgd":
+            from ..methods.optim_sam import SAM
+            sgd_kwargs = {
+                "lr": float(spec["lr"]),
+                "momentum": float(spec.get("momentum", 0.0)),
+                "weight_decay": float(spec.get("weight_decay", 0.0)),
+                "nesterov": bool(spec.get("nesterov", False)),
+            }
+            opts.append(SAM(
+                params, torch.optim.SGD,
+                rho=float(spec.get("rho", 0.05)),
+                adaptive=bool(spec.get("adaptive", False)),
+                **sgd_kwargs,
+            ))
         else:
             raise ValueError(f"unsupported optimizer kind {kind!r}")
     if not opts:
@@ -192,6 +206,7 @@ class Trainer:
             "commit": commit,
             "dirty": dirty,
             "split_hashes": self.split_hashes,
+            "scientific_hash": scientific_hash(self.cfg),
             "config_hash": config_hash(self.cfg),
             "params_total": int(n_params),
             "logits": self.cfg["method_name"],
@@ -246,8 +261,10 @@ class Trainer:
             for bi_raw, batch in enumerate(self.train_loader):
                 bi = bi_raw + batch_off
                 self.batch_index = bi
-                loss_dict = self.method.train_loss(
-                    tuple(t.to(self.device) if torch.is_tensor(t) else t for t in batch), self
+                loss_dict = self.method.run_step(
+                    tuple(t.to(self.device) if torch.is_tensor(t) else t for t in batch),
+                    self,
+                    self.optimizers,
                 )
                 nonfinite = [
                     name for name, value in loss_dict.items()
@@ -257,15 +274,6 @@ class Trainer:
                     raise FloatingPointError(
                         f"non-finite loss terms at epoch={epoch}, batch={bi}: "
                         f"{', '.join(nonfinite)}")
-                total = sum(v for v in loss_dict.values() if torch.is_tensor(v) and v.requires_grad)
-                for opt in self.optimizers:
-                    opt.zero_grad(set_to_none=True)
-                total.backward()
-                for opt in self.optimizers:
-                    opt.step()
-                # Ascent boundary: once after the declared successful steps
-                # (e.g. CBR dual ascent). Never invoked inside train_loss.
-                self.method.after_step(loss_dict, self)
             self.batch_index = 0
             self.scheduler.step()
             self.method.on_epoch_end(epoch, {})
@@ -300,6 +308,11 @@ class Trainer:
 
         if not self.manager.exists("selected"):
             shutil.copyfile(self.manager.last_path(), self.manager.ckpt_path("selected"))
+
+        self.method.on_train_end(self)
+        if getattr(self.method, "redeploy_after_train_end", False):
+            self.manager.save("selected", self._payload("selected", final_metrics))
+            self.manager.save("last", self._payload("last", final_metrics))
 
         manifest = self._manifest()
         with open(os.path.join(self.run_dir, "manifest.json"), "w") as f:

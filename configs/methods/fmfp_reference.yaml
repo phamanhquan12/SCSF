@@ -1,0 +1,6 @@
+default_score: msp
+method:
+  score: msp
+  rho: 0.05
+  swa_start: 180
+citation: "FMFP reference (Zhu et al., ECCV 2022) — official SAM two-pass on CE plus SWA averaging. Shared ccl_sc_reference step schedule is retained (disclosed deviation from official cosine+SWALR). Protocol: docs/NEXT5_PROTOCOL.md. Source: https://github.com/Impression2805/FMFP (MIT)."

@@ -23,6 +23,12 @@ from .depthfrag import DepthFragMethod
 from .depthfrag_v2 import DepthFragV2Method
 from .riskflow import RiskFlowMethod
 from .riskflow_v2 import RiskFlowV2Method
+from .crossfit_failure import CrossFitFailureMethod
+from .candidate_verify import CandidateVerifyMethod
+from .intervention_rank import InterventionRankMethod
+from .neighbor_distill import NeighborDistillMethod
+from .rank_sharpness import RankSharpnessMethod
+from .fmfp_reference import FMFPReferenceMethod
 
 _REGISTRY: Dict[str, Callable[..., Method]] = {}
 
@@ -110,6 +116,12 @@ for _n, _b in [
     # remove_gate: false restores v1's multiplicative gate (ablation only).
     ("riskflow_v2", RiskFlowV2Method),
     ("riskflow_v2_gate", RiskFlowV2Method),
+    ("crossfit_failure", CrossFitFailureMethod),
+    ("candidate_verify", CandidateVerifyMethod),
+    ("intervention_rank", InterventionRankMethod),
+    ("neighbor_distill", NeighborDistillMethod),
+    ("rank_sharpness", RankSharpnessMethod),
+    ("fmfp_reference", FMFPReferenceMethod),
 ]:
     register_method(_n, _b)
 

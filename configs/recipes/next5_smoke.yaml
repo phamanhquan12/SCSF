@@ -1,0 +1,35 @@
+# Smoke-only recipe. Never aggregated as a scientific run.
+# Forces short epochs and tiny overfit so every special path is exercised.
+train:
+  epochs: 2
+  batch_size: 32
+  optimizer: sgd
+  scheduler: step
+  lr: 0.1
+  momentum: 0.9
+  weight_decay: 0.0005
+  milestones: [1]
+  gamma: 0.5
+  eval_every: 1
+  save_every: 1
+  guard_delta_acc: 1.0
+  overfit: 64
+
+methods:
+  fmfp_reference:
+    swa_start: 0
+  sage_ds_v2:
+    utility_interval: 1
+  crossfit_failure:
+    pretrain: 0
+  intervention_rank:
+    pretrain: 0
+  neighbor_distill:
+    pretrain: 0
+  rank_sharpness:
+    pretrain: 0
+  scsf_correctness:
+    pretrain: 0
+
+smoke_only: true
+citation: "NEXT5 smoke recipe — SMOKE_ONLY, not a scientific protocol."

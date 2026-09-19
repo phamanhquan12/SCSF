@@ -1,0 +1,10 @@
+extends: scsf_correctness
+default_score: scsf_corr
+method:
+  score: scsf_corr
+  lambda_support: 0.3
+  control: distill
+  memory_path: null
+  frozen_features: false
+  head_seed_offset: 10004
+citation: "NEXT5 neighbor_distill — distill frozen CE neighborhood class-support into training-only heads. Not cross-fitted representation evidence. Protocol: docs/NEXT5_PROTOCOL.md."

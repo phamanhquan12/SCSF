@@ -1,0 +1,8 @@
+extends: scsf_correctness
+default_score: scsf_corr
+method:
+  score: scsf_corr
+  lambda_pair: 0.5
+  margin: 0.1
+  control: pair
+citation: "NEXT5 intervention_rank — within-image mixed-outcome ranking on two CIFAR views. Protocol: docs/NEXT5_PROTOCOL.md."

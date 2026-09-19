@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 from typing import Sequence
 
-from .splits import SplitSpec, load_split, make_stratified_split, split_hashes
+from .splits import SplitSpec, load_split, make_stratified_split, split_hashes, load_or_make_train_folds
 
 # The training loop refuses to open the official test set unless this flag is
 # set AND the caller is the explicit evaluator. The evaluator sets it around
@@ -40,6 +40,35 @@ DATASET_META = {
 }
 
 _SPLIT_LOADER = {}
+
+
+def get_effective_train_indices(cfg, split_spec: SplitSpec):
+    """Train indices after optional fold exclusion (teachers only).
+
+    ``data.exclude_fold`` / ``method.exclude_fold`` is the fold id held out of
+    the teacher. Validation is never filtered. Missing fold files are created
+    deterministically under the split index directory.
+    """
+    idxs = list(split_spec.train_indices)
+    exclude = cfg.get("data", {}).get("exclude_fold", None)
+    if exclude is None:
+        exclude = cfg.get("method", {}).get("exclude_fold", None)
+    if exclude is None or exclude == "" or exclude is False:
+        return idxs
+    n_folds = int(cfg.get("data", {}).get("n_folds", 2))
+    fold_seed = int(cfg.get("data", {}).get("fold_seed", split_spec.seed))
+    idx_dir = cfg["data"].get("split_index_dir") or cfg["data"].get("root") or "."
+    payload = load_or_make_train_folds(
+        idx_dir, cfg["dataset"], idxs, n_folds=n_folds, seed=fold_seed,
+    )
+    drop = set(int(i) for i in payload["folds"][int(exclude)])
+    out = [i for i in idxs if i not in drop]
+    if not out:
+        raise RuntimeError(f"exclude_fold={exclude} removed every train index")
+    overlap = drop & set(split_spec.val_indices)
+    if overlap:
+        raise RuntimeError("fold IDs overlap the validation split")
+    return out
 
 
 def get_split(cfg) -> SplitSpec:
@@ -81,7 +110,10 @@ def build_dataset(cfg, split: str = "train", return_indices: bool = False):
         if split not in ("train", "val"):
             raise ValueError(f"split must be train/val/test, got {split!r}")
         split_spec = get_split(cfg)
-        idxs = split_spec.train_indices if split == "train" else split_spec.val_indices
+        if split == "train":
+            idxs = get_effective_train_indices(cfg, split_spec)
+        else:
+            idxs = split_spec.val_indices
         base = _open_train_fold(cfg, split)
         ds = _IndexSubset(base, idxs)
 
@@ -110,13 +142,7 @@ def build_dataloader(cfg, split: str, batch_size=None, shuffle=None, return_indi
     if overfit and overfit > 0:
         if split == "test":
             raise ValueError("overfit is meaningless on the official test split")
-        n = int(overfit)
-        if hasattr(ds, "base") and hasattr(ds, "indices"):
-            ds = _IndexSubset(ds.base, ds.indices[:n])
-        elif hasattr(ds, "base"):
-            ds = _IndexDataset(_IndexSubset(ds.base, list(range(min(n, len(ds.base))))))
-        else:
-            ds = _IndexSubset(ds, list(range(min(n, len(ds)))))
+        ds = _cap_overfit(ds, int(overfit), return_indices=return_indices)
     if batch_size is None:
         batch_size = int(cfg["train"]["batch_size"])
     if shuffle is None:
@@ -209,6 +235,24 @@ def _normalize(cfg):
     return (tuple(stats["mean"]), tuple(stats["std"]))
 
 
+def _cap_overfit(ds, n: int, return_indices: bool = False):
+    """Keep the first ``n`` split IDs without rewriting official indices.
+
+    ``_IndexDataset`` stores the split in ``.base``; slicing positional
+    ``range(n)`` would replace official training IDs with 0..n-1 and break
+    OOF/memory lookup. Always slice the inner ``indices`` list.
+    """
+    wrap_idx = isinstance(ds, _IndexDataset) or bool(return_indices)
+    inner = ds.base if isinstance(ds, _IndexDataset) else ds
+    if hasattr(inner, "indices"):
+        inner = _IndexSubset(inner.base, list(inner.indices[:n]))
+    else:
+        inner = _IndexSubset(inner, list(range(min(n, len(inner)))))
+    if wrap_idx or isinstance(ds, _IndexDataset):
+        return _IndexDataset(inner)
+    return inner
+
+
 class _IndexSubset:
     """Subset that keeps track of the global training-fold indices."""
 
@@ -245,6 +289,7 @@ __all__ = [
     "build_dataset",
     "build_dataloader",
     "get_split",
+    "get_effective_train_indices",
     "get_test_transform",
     "get_train_transform",
     "split_hashes",

@@ -1,0 +1,12 @@
+default_score: q_argmax
+method:
+  score: q_argmax
+  control: verifier
+  lambda_verify: 1.0
+  n_random_negatives: 3
+  weight_positive: 1.0
+  weight_hard: 1.0
+  weight_random: 0.5
+  verifier_hidden: 128
+  head_seed_offset: 10002
+citation: "NEXT5 candidate_verify — class-conditioned verifier q(h, embed(c)); discriminative score, not a calibrated posterior. Protocol: docs/NEXT5_PROTOCOL.md."

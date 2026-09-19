@@ -20,6 +20,11 @@ with reproducible, test-locked scientific definitions.
     Classification (class-conditioned MoCo queues).
   * `sage_ds` — SAGE-DS: depth-wise selective supervision with a controller
     and per-site utility-EMA routing; ablated aliases `sage_ds_*`.
+  * `scsf_correctness` — review-aligned correctness-BCE baseline (distinct from
+    legacy TCP-MSE `scsf`).
+  * NEXT5 (see `docs/NEXT5_PROTOCOL.md`): `crossfit_failure`,
+    `candidate_verify`, `intervention_rank`, `neighbor_distill`,
+    `rank_sharpness`, plus `fmfp_reference`.
   * `depthfrag` — DepthFrag: distill depth-wise decision fragility into a
     terminal score. Signed relative fragility radii are extracted from a
     frozen checkpoint (`python -m scsf.extract_depthfg run_dir=...`) and an

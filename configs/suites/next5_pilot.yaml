@@ -1,0 +1,19 @@
+# next5_pilot — 11 method ids × datasets × seeds expanded by the launcher.
+# Fold teachers are first-class training jobs. Artifact tasks are added by DAG expansion.
+suite: next5_pilot
+recipe: ccl_sc_reference
+backbones: [vgg16_bn]
+datasets: [cifar10, cifar100]
+seeds: [13]
+rows:
+  - {id: ce,                 method_name: ce,                 variant: null}
+  - {id: ce.fold_teacher_a,  method_name: ce,                 variant: fold_teacher_a}
+  - {id: ce.fold_teacher_b,  method_name: ce,                 variant: fold_teacher_b}
+  - {id: scsf_correctness,   method_name: scsf_correctness,   variant: null}
+  - {id: sage_ds_v2,         method_name: sage_ds_v2,         variant: null}
+  - {id: fmfp_reference,     method_name: fmfp_reference,     variant: null}
+  - {id: candidate_verify,   method_name: candidate_verify,   variant: null}
+  - {id: intervention_rank,  method_name: intervention_rank,  variant: null}
+  - {id: rank_sharpness,     method_name: rank_sharpness,     variant: null}
+  - {id: crossfit_failure,   method_name: crossfit_failure,   variant: null}
+  - {id: neighbor_distill,   method_name: neighbor_distill,   variant: null}
