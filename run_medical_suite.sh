@@ -69,10 +69,15 @@ setup_and_find_python() {
                 exit 1
             fi
         }
-        log "Installing requirements..." >&2
+    fi
+
+    # Check if dependencies are actually installed
+    if ! "$VENV_DIR/bin/python" -c "import torch, kaggle" &>/dev/null; then
+        log "Dependencies missing in venv. Installing requirements..." >&2
         "$VENV_DIR/bin/pip" install --upgrade pip >&2
         "$VENV_DIR/bin/pip" install -r "$SCRIPT_DIR/requirements.txt" kaggle >&2
     fi
+
     echo "$VENV_DIR/bin/python"
 }
 
