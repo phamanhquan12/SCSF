@@ -22,6 +22,7 @@ dogs-vs-cats/
 *.log
 
 # Python
+.venv/
 *.egg-info/
 dist/
 build/

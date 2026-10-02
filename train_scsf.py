@@ -401,16 +401,20 @@ class VGG16BN_FeatureExtractor(nn.Module):
             if isinstance(layer, nn.MaxPool2d):
                 self.pool_indices.append(i)
     
-    def forward(self, x, return_features=False):
-        if not return_features:
+    def forward(self, x, return_features=False, return_pool3=False, return_spatial=False):
+        if not return_features and not return_spatial:
             return self.base_model(x)
         
         # Run through features, capturing intermediate outputs
+        feat_pool3 = None
         feat_pool4 = None
         feat_pool5 = None
+        capture_pool3 = return_pool3 or return_spatial
         
         for i, layer in enumerate(self.base_model.features):
             x = layer(x)
+            if capture_pool3 and len(self.pool_indices) >= 3 and i == self.pool_indices[2]:
+                feat_pool3 = x
             # Capture after pool4 (4th MaxPool, index 3 in pool_indices)
             if len(self.pool_indices) >= 4 and i == self.pool_indices[3]:
                 feat_pool4 = x
@@ -421,6 +425,11 @@ class VGG16BN_FeatureExtractor(nn.Module):
         # Classifier
         x = x.view(x.size(0), -1)
         logits = self.base_model.classifier(x)
+
+        if return_spatial:
+            if feat_pool3 is None or feat_pool4 is None or feat_pool5 is None:
+                raise RuntimeError("spatial pool features were requested but not captured")
+            return logits, feat_pool3, feat_pool4, feat_pool5
         
         # Conditional pooling: reduce to 2×2 only if spatial > 2, else keep
         if feat_pool4.size(2) > 2 or feat_pool4.size(3) > 2:
@@ -430,6 +439,12 @@ class VGG16BN_FeatureExtractor(nn.Module):
         if feat_pool5.size(2) > 2 or feat_pool5.size(3) > 2:
             feat_pool5 = self.gap(feat_pool5)
         feat_pool5 = feat_pool5.view(feat_pool5.size(0), -1)
+
+        if return_pool3:
+            if feat_pool3 is None:
+                raise RuntimeError("pool3 was requested but not captured")
+            feat_pool3 = F.adaptive_avg_pool2d(feat_pool3, 1).flatten(1)
+            return logits, feat_pool4, feat_pool5, feat_pool3
         
         return logits, feat_pool4, feat_pool5
 
@@ -686,7 +701,7 @@ def get_dataset(args):
     - Val: 2,000 samples (for RL reward)
     - Test: remaining samples (for final evaluation)
     
-    Supported: cifar10, svhn, catsdogs, covid
+    Supported: cifar10, cifar100, svhn, catsdogs, covid
     """
     data_root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data')
     
@@ -716,6 +731,29 @@ def get_dataset(args):
         torch.manual_seed(args.seed)
         valset, testset_final = random_split(testset, [2000, 8000])
         print(f'CIFAR-10: Train={len(trainset)}, Full_Test={len(testset)}, Val={len(valset)}, Final_Test={len(testset_final)}')
+
+    elif args.dataset == 'cifar100':
+        mean = (0.5071, 0.4867, 0.4408)
+        std = (0.2675, 0.2565, 0.2761)
+
+        transform_train = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+
+        trainset = datasets.CIFAR100(root=data_root, train=True, download=True, transform=transform_train)
+        testset = datasets.CIFAR100(root=data_root, train=False, download=True, transform=transform_test)
+        num_classes = 100
+
+        torch.manual_seed(args.seed)
+        valset, testset_final = random_split(testset, [2000, 8000])
+        print(f'CIFAR-100: Train={len(trainset)}, Full_Test={len(testset)}, Val={len(valset)}, Final_Test={len(testset_final)}')
         
     elif args.dataset == 'svhn':
         # SVHN normalization - MUST match baseline (0.5, 0.5, 0.5)
