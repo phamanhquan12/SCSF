@@ -45,25 +45,31 @@ log "Launch log: $LAUNCH_LOG"
 # --------------------------------------------------------------------------- #
 # Python / virtualenv detection
 # --------------------------------------------------------------------------- #
-find_python() {
+setup_and_find_python() {
     if [[ -n "${VIRTUAL_ENV:-}" ]]; then echo "$VIRTUAL_ENV/bin/python"; return; fi
     if [[ -n "${CONDA_PREFIX:-}" ]]; then echo "$CONDA_PREFIX/bin/python"; return; fi
-    for candidate in \
-        "$SCRIPT_DIR/.venv/bin/python" \
-        "$SCRIPT_DIR/venv/bin/python" \
-        "$SCRIPT_DIR/../.venv/bin/python" \
-        "$HOME/.venv/bin/python" \
-        "/home/viet2005/workspace/Research/SCSF/.venv/bin/python"
-    do
-        if [[ -x "$candidate" ]]; then echo "$candidate"; return; fi
-    done
-    if command -v python3 &>/dev/null; then echo "$(command -v python3)"; return; fi
-    echo ""
+    
+    local VENV_DIR="$SCRIPT_DIR/.venv"
+    if [[ ! -x "$VENV_DIR/bin/python" ]]; then
+        log "Virtual environment not found at $VENV_DIR. Creating..." >&2
+        if ! command -v python3 &>/dev/null; then
+            log "ERROR: python3 is not installed on the system." >&2
+            exit 1
+        fi
+        python3 -m venv "$VENV_DIR" || {
+            log "ERROR: Failed to create venv. Is python3-venv installed?" >&2
+            exit 1
+        }
+        log "Installing requirements..." >&2
+        "$VENV_DIR/bin/pip" install --upgrade pip >&2
+        "$VENV_DIR/bin/pip" install -r "$SCRIPT_DIR/requirements.txt" kaggle >&2
+    fi
+    echo "$VENV_DIR/bin/python"
 }
 
-PYTHON="$(find_python)"
+PYTHON="$(setup_and_find_python)"
 if [[ -z "$PYTHON" ]]; then
-    log "ERROR: No Python interpreter found. Activate your virtualenv first."
+    log "ERROR: No Python interpreter found."
     exit 1
 fi
 log "Python: $PYTHON ($($PYTHON --version 2>&1))"

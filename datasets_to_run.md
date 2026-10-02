@@ -1,0 +1,14 @@
+| Dataset name            | Kaggle URL                                                                                                                                                                   |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Covid-Qu-Ex**         | [https://www.kaggle.com/datasets/anasmohammedtahir/covidqu](https://www.kaggle.com/datasets/anasmohammedtahir/covidqu)                                                       |
+| **Brain Tumor MRI**     | [https://www.kaggle.com/datasets/mohammadhossein77/brain-tumors-dataset](https://www.kaggle.com/datasets/mohammadhossein77/brain-tumors-dataset)                             |
+| **Brain Tumor MRI Masoud** | [https://www.kaggle.com/datasets/masoudnickparvar/brain-tumor-mri-dataset](https://www.kaggle.com/datasets/masoudnickparvar/brain-tumor-mri-dataset)                       |
+| **Malaria Microscopic** | [https://www.kaggle.com/datasets/iarunava/cell-images-for-detecting-malaria](https://www.kaggle.com/datasets/iarunava/cell-images-for-detecting-malaria)                     |
+| **Chest CT-Scan**       | [https://www.kaggle.com/datasets/mohamedhanyyy/chest-ctscan-images](https://www.kaggle.com/datasets/mohamedhanyyy/chest-ctscan-images)                                       |
+| **Tuberculosis X-ray**  | [https://www.kaggle.com/datasets/tawsifurrahman/tuberculosis-tb-chest-xray-dataset](https://www.kaggle.com/datasets/tawsifurrahman/tuberculosis-tb-chest-xray-dataset)       |
+| **Brain Cancer MRI**    | [https://www.kaggle.com/datasets/orvile/brain-cancer-mri-dataset](https://www.kaggle.com/datasets/orvile/brain-cancer-mri-dataset)                                           |
+| **SARS-CoV-2 CT**       | [https://www.kaggle.com/datasets/plameneduardo/sarscov2-ctscan-dataset](https://www.kaggle.com/datasets/plameneduardo/sarscov2-ctscan-dataset)                               |
+| **Breast Ultrasound**   | [https://www.kaggle.com/datasets/aryashah2k/breast-ultrasound-images-dataset](https://www.kaggle.com/datasets/aryashah2k/breast-ultrasound-images-dataset)                   |
+| **Retinal OCT**         | [https://www.kaggle.com/datasets/paultimothymooney/kermany2018](https://www.kaggle.com/datasets/paultimothymooney/kermany2018)                                               |
+| **HAM10000**            | [https://www.kaggle.com/datasets/kmader/skin-cancer-mnist-ham10000](https://www.kaggle.com/datasets/kmader/skin-cancer-mnist-ham10000)                                       |
+| **APTOS 2019**          | [https://www.kaggle.com/datasets/mariaherrerot/aptos2019](https://www.kaggle.com/datasets/mariaherrerot/aptos2019)                                                           |
