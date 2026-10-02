@@ -1749,7 +1749,7 @@ def main():
     print(f'{"="*80}')
     
     final_coverage, final_acc, final_aurc, final_conf, final_tcp = \
-        evaluate_selective_risk(model, meta_cal, testloader, COVERAGE_POINTS, device)
+        evaluate_selective_risk(model, meta_cal, testloader_full, COVERAGE_POINTS, device)
     
     print(f'\nTotal Accuracy: {final_acc:.2f}%')
     print(f'Global AURC: {final_aurc:.4f}')
@@ -1765,7 +1765,7 @@ def main():
     
     # Evaluate with learned threshold
     thr_coverage, thr_error, thr_acc = evaluate_with_threshold(
-        model, meta_cal, testloader, current_threshold, device
+        model, meta_cal, testloader_full, current_threshold, device
     )
     print(f'\n{"="*80}')
     print(f'THRESHOLD-BASED REJECTION (τ = {current_threshold:.3f})')

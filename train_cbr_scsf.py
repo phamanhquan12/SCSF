@@ -598,7 +598,7 @@ def main():
 
     # get_dataset supplies a shuffled, unbalanced train loader: this preserves
     # natural class priors as required by the global coverage equation.
-    train_loader, val_loader, test_loader, _, num_classes = get_dataset(args)
+    train_loader, val_loader, test_loader, test_loader_full, num_classes = get_dataset(args)
     args.group_matrix = (
         coarse_group_matrix(num_classes, device, torch.float32)
         if args.confusion_groups == "coarse"
@@ -706,7 +706,7 @@ def main():
     test = evaluate(
         backbone,
         confidence_head,
-        test_loader,
+        test_loader_full,
         args.coverages,
         num_classes,
         device,

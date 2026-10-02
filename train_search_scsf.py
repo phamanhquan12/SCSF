@@ -291,7 +291,7 @@ def main():
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    train_loader, val_loader, test_loader, _, num_classes = get_dataset(args)
+    train_loader, val_loader, test_loader, test_loader_full, num_classes = get_dataset(args)
     backbone = VGG16BN_FeatureExtractor(num_classes=num_classes, input_size=32).to(
         device
     )
@@ -375,7 +375,7 @@ def main():
     backbone.load_state_dict(checkpoint["backbone"])
     calibrator.load_state_dict(checkpoint["calibrator"])
     validation = evaluate(backbone, calibrator, val_loader, device)
-    test = evaluate(backbone, calibrator, test_loader, device)
+    test = evaluate(backbone, calibrator, test_loader_full, device)
     results = {
         "eval_checkpoint": "last",
         "variant": args.variant,

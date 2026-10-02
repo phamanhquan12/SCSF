@@ -435,7 +435,7 @@ def main():
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    base_train, val_loader, test_loader, _, num_classes = get_dataset(args)
+    base_train, val_loader, test_loader, test_loader_full, num_classes = get_dataset(args)
     train_loader = make_two_view_loader(base_train, args.batch_size, args.workers)
     if args.limit_train_batches > 0:
         train_loader = LimitedLoader(train_loader, args.limit_train_batches)
@@ -540,7 +540,7 @@ def main():
     print(f"Loaded validation-best epoch {checkpoint['epoch']}")
 
     val_metrics = evaluate(backbone, probe, transition_head, val_loader, device)
-    test_metrics = evaluate(backbone, probe, transition_head, test_loader, device)
+    test_metrics = evaluate(backbone, probe, transition_head, test_loader_full, device)
     print_metrics("Validation", val_metrics)
     print_metrics("Test", test_metrics)
 

@@ -463,7 +463,7 @@ def main():
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    base_train, val_loader, test_loader, _, num_classes = get_dataset(args)
+    base_train, val_loader, test_loader, test_loader_full, num_classes = get_dataset(args)
     train_loader = make_two_view_loader(base_train, args.batch_size, args.workers)
     if args.limit_train_batches > 0:
         train_loader = LimitedLoader(train_loader, args.limit_train_batches)
@@ -566,7 +566,7 @@ def main():
     backbone.load_state_dict(checkpoint["backbone"])
     calibrator.load_state_dict(checkpoint["calibrator"])
     validation = evaluate(backbone, calibrator, val_loader, device)
-    test = evaluate(backbone, calibrator, test_loader, device)
+    test = evaluate(backbone, calibrator, test_loader_full, device)
     results = {
         "eval_checkpoint": "last",
         "last_epoch": checkpoint["epoch"],
