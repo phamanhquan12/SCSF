@@ -57,8 +57,17 @@ setup_and_find_python() {
             exit 1
         fi
         python3 -m venv "$VENV_DIR" || {
-            log "ERROR: Failed to create venv. Is python3-venv installed?" >&2
-            exit 1
+            log "Failed to create venv. Attempting to install python3-venv..." >&2
+            if [[ $EUID -eq 0 ]] && command -v apt-get &>/dev/null; then
+                apt-get update -yqq && apt-get install -y python3-venv >&2
+                python3 -m venv "$VENV_DIR" || {
+                    log "ERROR: Still failed to create venv." >&2
+                    exit 1
+                }
+            else
+                log "ERROR: Failed to create venv. Is python3-venv installed?" >&2
+                exit 1
+            fi
         }
         log "Installing requirements..." >&2
         "$VENV_DIR/bin/pip" install --upgrade pip >&2
