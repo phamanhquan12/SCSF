@@ -75,6 +75,8 @@ setup_and_find_python() {
     if ! "$VENV_DIR/bin/python" -c "import torch, kaggle" &>/dev/null; then
         log "Dependencies missing in venv. Installing requirements..." >&2
         "$VENV_DIR/bin/pip" install --upgrade pip >&2
+        log "Installing PyTorch with CUDA support..." >&2
+        "$VENV_DIR/bin/pip" install torch torchvision --index-url https://download.pytorch.org/whl/cu121 >&2
         "$VENV_DIR/bin/pip" install -r "$SCRIPT_DIR/requirements.txt" kaggle >&2
     fi
 
