@@ -215,7 +215,9 @@ def _transforms(spec: DatasetSpec):
 def _limit_dataset(dataset: Dataset, limit: Optional[int]) -> Dataset:
     if limit is None or limit <= 0 or limit >= len(dataset):
         return dataset
-    return Subset(dataset, list(range(limit)))
+    # Evenly spaced indices: class-sorted datasets (ImageFolder) would otherwise yield a single class.
+    step = len(dataset) / limit
+    return Subset(dataset, [int(i * step) for i in range(limit)])
 
 
 def _split_test(testset: Dataset, val_size: Optional[int], seed: int):
