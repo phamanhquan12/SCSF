@@ -3,7 +3,9 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 import json
+import os
 from pathlib import Path
 import random
 import re
@@ -18,6 +20,8 @@ from PIL import Image, UnidentifiedImageError
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+# Bump when the cache layout or split logic changes so stale caches are rebuilt.
+CACHE_FORMAT_VERSION = 2
 SPLIT_ALIASES = {
     "train": "train",
     "training": "train",
@@ -228,7 +232,9 @@ def _discover_ham10000_samples(raw_root: Path) -> list[dict]:
             diagnosis = row.get("dx")
             if not image_id or not diagnosis or image_id not in image_lookup:
                 continue
-            rows.append({"source_path": image_lookup[image_id], "split": None, "class_name": diagnosis})
+            # Several images per lesion: split by lesion_id so a lesion never spans train and test.
+            group = row.get("lesion_id") or image_id
+            rows.append({"source_path": image_lookup[image_id], "split": None, "class_name": diagnosis, "group": group})
     if not rows:
         raise RuntimeError(f"HAM10000 metadata found at {metadata_path}, but no labelled images were resolved.")
     return rows
@@ -279,13 +285,15 @@ def _discover_aptos2019_samples(raw_root: Path) -> list[dict]:
 
 
 def _stable_split(rows: list[dict], seed: int) -> list[dict]:
-    by_class: dict[str, list[dict]] = {}
+    """Stratified 70/10/20 split. Rows sharing a "group" (e.g. HAM10000 lesion_id) stay together."""
+    by_class: dict[str, dict[str, list[dict]]] = {}
     for row in rows:
-        by_class.setdefault(row["class_name"], []).append(row)
+        group = str(row.get("group") or row["source_path"])
+        by_class.setdefault(row["class_name"], {}).setdefault(group, []).append(row)
     rng = random.Random(seed)
     split_rows: list[dict] = []
-    for class_name, class_rows in sorted(by_class.items()):
-        ordered = list(class_rows)
+    for class_name, groups in sorted(by_class.items()):
+        ordered = [groups[key] for key in sorted(groups)]
         rng.shuffle(ordered)
         n = len(ordered)
         n_train = max(1, int(round(n * 0.70)))
@@ -293,9 +301,9 @@ def _stable_split(rows: list[dict], seed: int) -> list[dict]:
         if n_train + n_val >= n and n > 1:
             n_train = n - 1
             n_val = 0
-        for idx, row in enumerate(ordered):
+        for idx, group_rows in enumerate(ordered):
             split = "train" if idx < n_train else "val" if idx < n_train + n_val else "test"
-            split_rows.append({**row, "split": split})
+            split_rows.extend({**row, "split": split} for row in group_rows)
     return split_rows
 
 
@@ -319,30 +327,34 @@ def _resolve_splits(rows: list[dict], seed: int) -> list[dict]:
 
 
 def _copy_and_resize(rows: list[dict], cache_root: Path, input_size: int) -> list[dict]:
-    manifest_rows = []
-    for row in rows:
+    """Cache RGB PNGs with the shorter side resized to input_size (same op as the loader's
+    T.Resize(input_size), which then becomes a no-op), so epochs never decode full-size originals."""
+    resize = T.Resize(input_size)
+
+    def cache_one(row: dict) -> dict | None:
         source = Path(row["source_path"])
         class_name = str(row["class_name"]).strip().replace("/", "_")
         digest = hashlib.sha1(str(source).encode("utf-8")).hexdigest()[:16]
-        dest = cache_root / row["split"] / class_name / f"{source.stem}_{digest}{source.suffix.lower()}"
+        dest = cache_root / row["split"] / class_name / f"{source.stem}_{digest}.png"
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
             with Image.open(source) as image:
-                image.verify()
+                resized = resize(image.convert("RGB"))
         except (OSError, UnidentifiedImageError):
-            continue
+            return None
         if dest.exists() or dest.is_symlink():
             dest.unlink()
-        dest.symlink_to(source.resolve())
-        manifest_rows.append(
-            {
-                "split": row["split"],
-                "class_name": class_name,
-                "source_path": str(source),
-                "cached_path": str(dest),
-            }
-        )
-    return manifest_rows
+        resized.save(dest, format="PNG")
+        return {
+            "split": row["split"],
+            "class_name": class_name,
+            "source_path": str(source),
+            "cached_path": str(dest),
+        }
+
+    with ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as pool:
+        results = list(pool.map(cache_one, rows))
+    return [row for row in results if row is not None]
 
 
 def _stats_from_manifest(rows: list[dict], input_size: int):
@@ -389,6 +401,12 @@ def prepare_medical_imagefolder(
     if force and cache_root.exists():
         shutil.rmtree(cache_root)
 
+    if cache_root.exists() and stats_path.exists():
+        cached_version = json.loads(stats_path.read_text(encoding="utf-8")).get("cache_format_version", 1)
+        if cached_version != CACHE_FORMAT_VERSION:
+            print(f"Rebuilding {cache_root}: cache format {cached_version} -> {CACHE_FORMAT_VERSION}")
+            shutil.rmtree(cache_root)
+
     if manifest_path.exists() and stats_path.exists():
         metadata = json.loads(stats_path.read_text(encoding="utf-8"))
         return PreparedMedicalDataset(
@@ -429,6 +447,7 @@ def prepare_medical_imagefolder(
         "kaggle_slug": entry.kaggle_slug,
         "url": entry.url,
         "input_size": input_size,
+        "cache_format_version": CACHE_FORMAT_VERSION,
         "split_seed": seed,
         "classes": classes,
         "num_classes": len(classes),
@@ -438,7 +457,8 @@ def prepare_medical_imagefolder(
         "preprocessing": [
             f"download/unpack Kaggle dataset to {raw_root}",
             f"resize RGB images to {input_size}x{input_size} in the shared loader",
-            "store canonical ImageFolder split cache as symlinks to avoid duplicating large datasets",
+            f"store ImageFolder split cache as RGB PNGs with the shorter side resized to {input_size}",
+            "split HAM10000 by lesion_id so no lesion appears in more than one split",
             "normalize with train-split dataset-specific mean/std",
         ],
     }
