@@ -11,8 +11,15 @@
 #   screen -S scsf bash run_medical_suite.sh --gpu 0
 #   tmux new-session -d -s scsf "bash run_medical_suite.sh --gpu 0"
 #
-# Resume after interruption:
-#   bash run_medical_suite.sh --skip-existing --gpu 0
+# Default: thesis datasets (datasets_thesis.md) x {sr, ccl_sc (official), sat, dg,
+# selectivenet, scsf, dualaug} x training seeds {0, 1, 2}, each evaluated on the full
+# test set; tables/ reports mean/std across training seeds.
+#
+# Resume after interruption (reuse the run id printed at launch):
+#   bash run_medical_suite.sh --skip-existing --run-id 20261005_030000 --gpu 0
+#
+# Seeds / CCL-SC variants (mean and std are taken across training seeds):
+#   bash run_medical_suite.sh --seeds 42 0 1 --ccl-variants official paper
 #
 # Smoke test:
 #   bash run_medical_suite.sh --smoke-train-samples 64 --smoke-eval-samples 32 \
@@ -106,10 +113,10 @@ fi
 # --------------------------------------------------------------------------- #
 # Defaults (override via CLI args)
 # --------------------------------------------------------------------------- #
-DATASETS_FILE="$SCRIPT_DIR/datasets_to_run.md"
+DATASETS_FILE="$SCRIPT_DIR/datasets_thesis.md"
 DATA_DIR="$SCRIPT_DIR/data"
 RESULTS_ROOT="$SCRIPT_DIR/results/paper/medical_suite"
-METHODS=(ccl_sc residual_head dp_head spatial_head)
+METHODS=(sr ccl_sc sat dg selectivenet scsf dualaug)
 ARCH="resnet50"
 EPOCHS=100
 PRETRAIN=20
@@ -118,7 +125,9 @@ EVAL_BATCH_SIZE=128
 WORKERS=4
 LR=0.01
 LR_GAMMA=0.1
-SEED=42
+SEEDS=(0 1 2)
+CCL_VARIANTS=(official)
+RUN_ID="$RUN_TS"
 GPU=""
 INPUT_SIZE=224
 DOWNLOAD_FLAG="--download"
@@ -135,9 +144,21 @@ while [[ $# -gt 0 ]]; do
         --pretrain)       PRETRAIN="$2"; shift 2 ;;
         --batch-size)     BATCH_SIZE="$2"; shift 2 ;;
         --workers)        WORKERS="$2"; shift 2 ;;
-        --seed)           SEED="$2"; shift 2 ;;
+        --seeds)
+            shift; SEEDS=()
+            while [[ $# -gt 0 && "${1:0:1}" != "-" ]]; do
+                SEEDS+=("$1"); shift
+            done
+            ;;
+        --ccl-variants)
+            shift; CCL_VARIANTS=()
+            while [[ $# -gt 0 && "${1:0:1}" != "-" ]]; do
+                CCL_VARIANTS+=("$1"); shift
+            done
+            ;;
         --data-dir)       DATA_DIR="$2"; shift 2 ;;
         --results-root)   RESULTS_ROOT="$2"; shift 2 ;;
+        --run-id)         RUN_ID="$2"; shift 2 ;;
         --datasets-file)  DATASETS_FILE="$2"; shift 2 ;;
         --no-download)    DOWNLOAD_FLAG=""; shift ;;
         --methods)
@@ -158,7 +179,7 @@ CMD=(
     "--datasets-file"   "$DATASETS_FILE"
     "--data-dir"        "$DATA_DIR"
     "--results-root"    "$RESULTS_ROOT"
-    "--run-id"          "$RUN_TS"
+    "--run-id"          "$RUN_ID"
     "--methods"         "${METHODS[@]}"
     "--arch"            "$ARCH"
     "--input-size"      "$INPUT_SIZE"
@@ -170,7 +191,8 @@ CMD=(
     "--lr"              "$LR"
     "--milestones"      40 70 90
     "--lr-gamma"        "$LR_GAMMA"
-    "--seed"            "$SEED"
+    "--seeds"           "${SEEDS[@]}"
+    "--ccl-variants"    "${CCL_VARIANTS[@]}"
     "--pretrained"
 )
 [[ -n "$GPU" ]]           && CMD+=("--gpu" "$GPU")
@@ -181,8 +203,10 @@ CMD+=("${EXTRA_ARGS[@]}")
 # Print and run
 # --------------------------------------------------------------------------- #
 log "Methods : ${METHODS[*]}"
+log "Seeds   : ${SEEDS[*]}"
+log "CCL-SC  : ${CCL_VARIANTS[*]}"
 log "Datasets: $DATASETS_FILE"
-log "Results : $RESULTS_ROOT/$RUN_TS"
+log "Results : $RESULTS_ROOT/$RUN_ID"
 log "Command : ${CMD[*]}"
 log ""
 
@@ -192,4 +216,4 @@ exec > >(tee -a "$LAUNCH_LOG") 2>&1
 
 log ""
 log "=== Medical suite COMPLETED ==="
-log "Results at: $RESULTS_ROOT/$RUN_TS"
+log "Results at: $RESULTS_ROOT/$RUN_ID"

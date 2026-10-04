@@ -1,0 +1,9 @@
+| Dataset name            | Kaggle URL                                                                                                                                                                   |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Covid-Qu-Ex**         | [https://www.kaggle.com/datasets/anasmohammedtahir/covidqu](https://www.kaggle.com/datasets/anasmohammedtahir/covidqu)                                                       |
+| **HAM10000**            | [https://www.kaggle.com/datasets/kmader/skin-cancer-mnist-ham10000](https://www.kaggle.com/datasets/kmader/skin-cancer-mnist-ham10000)                                       |
+| **Malaria Microscopic** | [https://www.kaggle.com/datasets/iarunava/cell-images-for-detecting-malaria](https://www.kaggle.com/datasets/iarunava/cell-images-for-detecting-malaria)                     |
+| **APTOS 2019**          | [https://www.kaggle.com/datasets/mariaherrerot/aptos2019](https://www.kaggle.com/datasets/mariaherrerot/aptos2019)                                                           |
+| **Brain Tumor MRI Masoud** | [https://www.kaggle.com/datasets/masoudnickparvar/brain-tumor-mri-dataset](https://www.kaggle.com/datasets/masoudnickparvar/brain-tumor-mri-dataset)                       |
+| **Breast Ultrasound**   | [https://www.kaggle.com/datasets/aryashah2k/breast-ultrasound-images-dataset](https://www.kaggle.com/datasets/aryashah2k/breast-ultrasound-images-dataset)                   |
+| **Chest CT-Scan**       | [https://www.kaggle.com/datasets/mohamedhanyyy/chest-ctscan-images](https://www.kaggle.com/datasets/mohamedhanyyy/chest-ctscan-images)                                       |

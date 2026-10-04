@@ -14,7 +14,7 @@ import sys
 from scsf.medical_registry import parse_datasets_to_run
 
 
-DEFAULT_METHODS = ["ccl_sc", "residual_head", "dp_head", "spatial_head"]
+DEFAULT_METHODS = ["sr", "ccl_sc", "sat", "dg", "selectivenet", "scsf", "dualaug"]
 
 
 def union_fieldnames(rows: list[dict]) -> list[str]:
@@ -49,7 +49,7 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=0.01)
     parser.add_argument("--milestones", type=int, nargs="+", default=[40, 70, 90])
     parser.add_argument("--lr-gamma", type=float, default=0.1)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seeds", type=int, nargs="+", default=[42, 0, 1], help="Training seeds; mean/std are taken across these runs")
     parser.add_argument("--gpu", default=None)
     parser.add_argument("--medical-split-seed", type=int, default=42)
     parser.add_argument("--smoke-train-samples", type=int, default=None)
@@ -63,17 +63,6 @@ def parse_args():
     parser.add_argument("--min-meta-weight", type=float, default=1e-4)
     parser.add_argument("--scsf-scorer", default="meta", choices=["meta", "sr", "meta_sr_product", "meta_sr_blend", "geometric", "meta_agreement", "min_sr_meta", "margin", "energy", "doctor"])
     parser.add_argument("--scsf-sr-alpha", type=float, default=0.5)
-    parser.add_argument(
-        "--scsf-multi-trial-scorers",
-        nargs="+",
-        default=None,
-        choices=["meta", "sr", "meta_sr_product", "meta_sr_blend", "geometric", "meta_agreement", "min_sr_meta", "margin", "energy", "doctor"],
-        help="Optional SCSF scorer list to evaluate post-hoc from the same checkpoint.",
-    )
-    parser.add_argument("--multi-trial-checkpoint", default="last", choices=["best", "last"])
-    parser.add_argument("--multi-trial-seeds", type=int, nargs="+", default=[10, 42, 123])
-    parser.add_argument("--multi-trial-val-fraction", type=float, default=0.2)
-    parser.add_argument("--skip-multi-trial", action="store_true")
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--pretrained", action="store_true", help="Use ImageNet pretrained weights for ResNet/DenseNet")
@@ -82,6 +71,17 @@ def parse_args():
     parser.add_argument("--min-agree-weight", type=float, default=1e-4, help="Minimum BCE weight after cosine decay")
     parser.add_argument("--dp-proj-damping", type=float, default=1e-2, help="Damping for dp_head null-space projection")
     parser.add_argument("--spatial-d-head", type=int, default=128, help="Attention dim for spatial_head")
+    # --- Baselines ---
+    parser.add_argument("--dg-reward", type=float, default=None,
+                        help="Deep Gamblers o; default lets run_experiment pick min(2.2, (1 + classes) / 2) per dataset")
+    parser.add_argument("--sn-target-coverage", type=float, default=0.8)
+    # --- CCL-SC (paper defaults for few-class datasets: CIFAR-10 / CelebA) ---
+    parser.add_argument("--ccl-variants", nargs="+", default=["official"], choices=["official", "paper"],
+                        help="CCL-SC implementations to run; each becomes its own variant directory")
+    parser.add_argument("--ccl-weight", type=float, default=0.5)
+    parser.add_argument("--ccl-temperature", type=float, default=0.1)
+    parser.add_argument("--ccl-queue-size", type=int, default=300)
+    parser.add_argument("--ccl-momentum", type=float, default=0.999)
     return parser.parse_args()
 
 
@@ -100,19 +100,6 @@ def scsf_variant(args) -> str:
         f"__minlam-{args.min_meta_weight:g}"
         f"__scorer-{args.scsf_scorer}"
     )
-
-
-def scsf_variant_for_scorer(variant: str, scorer: str) -> str:
-    parts = variant.split("__")
-    replaced = False
-    for idx, part in enumerate(parts):
-        if part.startswith("scorer-"):
-            parts[idx] = f"scorer-{scorer}"
-            replaced = True
-            break
-    if not replaced:
-        parts.append(f"scorer-{scorer}")
-    return "__".join(parts)
 
 
 def write_run_config(args, run_root: Path, entries):
@@ -159,8 +146,15 @@ def log_skip(message: str, commands_file: Path):
         f.write(f"# {message}\n")
 
 
-def train_command(args, run_root: Path, dataset: str, method: str) -> tuple[list[str], Path, str]:
-    variant = scsf_variant(args) if method == "scsf" else "default"
+def method_variants(args, method: str) -> list[str]:
+    if method == "scsf":
+        return [scsf_variant(args)]
+    if method == "ccl_sc":
+        return [f"ccl-{name}" for name in args.ccl_variants]
+    return ["default"]
+
+
+def train_command(args, run_root: Path, dataset: str, method: str, variant: str, seed: int) -> tuple[list[str], Path]:
     cmd = [
         sys.executable,
         "run_experiment.py",
@@ -197,7 +191,7 @@ def train_command(args, run_root: Path, dataset: str, method: str) -> tuple[list
         "--lr-gamma",
         str(args.lr_gamma),
         "--seed",
-        str(args.seed),
+        str(seed),
         "--save-dir",
         str(run_root / "checkpoints"),
         "--metrics-dir",
@@ -231,6 +225,25 @@ def train_command(args, run_root: Path, dataset: str, method: str) -> tuple[list
             "--meta-lr", str(args.meta_lr),
             "--pretrain", str(args.pretrain),
         ])
+    if method == "ccl_sc":
+        cmd.extend([
+            "--ccl-variant", variant.removeprefix("ccl-"),
+            "--ccl-weight", str(args.ccl_weight),
+            "--ccl-temperature", str(args.ccl_temperature),
+            "--ccl-queue-size", str(args.ccl_queue_size),
+            "--ccl-momentum", str(args.ccl_momentum),
+        ])
+    if method == "dualaug":
+        cmd.extend([
+            "--scsf-feature-spec", args.scsf_feature_spec,
+            "--hidden-dim", str(args.hidden_dim),
+            "--meta-lr", str(args.meta_lr),
+            "--min-meta-weight", str(args.min_meta_weight),
+        ])
+    if method == "dg" and args.dg_reward is not None:
+        cmd.extend(["--reward", str(args.dg_reward)])
+    if method == "selectivenet":
+        cmd.extend(["--target-coverage", str(args.sn_target_coverage)])
     if method == "scsf":
         cmd.extend(
             [
@@ -254,86 +267,92 @@ def train_command(args, run_root: Path, dataset: str, method: str) -> tuple[list
                 str(args.scsf_sr_alpha),
             ]
         )
-    checkpoint_dir = run_root / "checkpoints" / dataset / args.arch / method / variant / str(args.seed)
-    return cmd, checkpoint_dir, variant
+    checkpoint_dir = run_root / "checkpoints" / dataset / args.arch / method / variant / str(seed)
+    return cmd, checkpoint_dir
 
 
-def eval_command(args, checkpoint: Path, output_dir: Path, method: str) -> list[str]:
-    cmd = [
-        sys.executable,
-        "run_multi_trial_eval.py",
-        "--checkpoint",
-        str(checkpoint),
-        "--output-dir",
-        str(output_dir),
-        "--seeds",
-        *[str(seed) for seed in args.multi_trial_seeds],
-        "--val-fraction",
-        str(args.multi_trial_val_fraction),
-        "--eval-batch-size",
-        str(args.eval_batch_size),
-        "--workers",
-        str(args.workers),
-    ]
-    if args.download:
-        cmd.append("--download")
-    if method == "scsf":
-        cmd.extend(["--scsf-scorer", args.scsf_scorer, "--scsf-sr-alpha", str(args.scsf_sr_alpha)])
-    add_if_present(cmd, "--gpu", args.gpu)
-    return cmd
+def mean_std(values: list[float]) -> tuple[float, float]:
+    mean = sum(values) / len(values)
+    if len(values) < 2:
+        return mean, float("nan")
+    var = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
+    return mean, var ** 0.5
 
 
-def eval_commands_for_method(args, run_root: Path, dataset: str, method: str, variant: str, checkpoint: Path) -> list[tuple[list[str], Path, str]]:
-    scorers = args.scsf_multi_trial_scorers if method == "scsf" and args.scsf_multi_trial_scorers else [None]
-    commands = []
-    for scorer in scorers:
-        eval_variant = scsf_variant_for_scorer(variant, scorer) if scorer is not None else variant
-        output_dir = run_root / "metrics" / dataset / args.arch / method / eval_variant / f"{args.multi_trial_checkpoint}_multi_trial"
-        cmd = eval_command(args, checkpoint, output_dir, method)
-        if scorer is not None:
-            cmd = [token for token in cmd if token not in ["--scsf-scorer", args.scsf_scorer]]
-            cmd.extend(["--scsf-scorer", scorer])
-        commands.append((cmd, output_dir, eval_variant))
-    return commands
+def to_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
-def aggregate_tables(run_root: Path):
-    allowed_methods = None
-    args_path = run_root / "config" / "args.json"
-    if args_path.exists():
-        try:
-            allowed_methods = set(json.loads(args_path.read_text(encoding="utf-8")).get("methods", []))
-        except json.JSONDecodeError:
-            allowed_methods = None
+def aggregate_tables(run_root: Path, methods: list[str], seeds: list[int]):
+    """Per-seed results plus mean/std (ddof=1) across training seeds, all on the full test set."""
+    metrics_root = run_root / "metrics"
+    allowed_seeds = {f"seed_{seed}" for seed in seeds}
+    tables_dir = run_root / "tables"
+    tables_dir.mkdir(parents=True, exist_ok=True)
 
-    rows = []
-    for summary_path in sorted((run_root / "metrics").glob("*/*/*/*/*_multi_trial/multi_trial_summary.csv")):
-        parts = summary_path.relative_to(run_root / "metrics").parts
-        if allowed_methods is not None and parts[2] not in allowed_methods:
+    seed_rows = []
+    for summary_path in sorted(metrics_root.glob("*/*/*/*/seed_*/last/summary.csv")):
+        dataset, arch, method, variant, seed_dir = summary_path.relative_to(metrics_root).parts[:5]
+        if method not in methods or seed_dir not in allowed_seeds:
             continue
         with summary_path.open(newline="") as f:
             row = next(csv.DictReader(f))
-        row.update({"dataset": parts[0], "arch": parts[1], "method": parts[2], "variant": parts[3], "checkpoint_eval": parts[4]})
-        rows.append(row)
-    tables_dir = run_root / "tables"
-    tables_dir.mkdir(parents=True, exist_ok=True)
-    if rows:
-        with (tables_dir / "main_results_mean_std.csv").open("w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=union_fieldnames(rows))
-            writer.writeheader()
-            writer.writerows(rows)
+        row.update({"dataset": dataset, "arch": arch, "method": method, "variant": variant, "seed": seed_dir.removeprefix("seed_")})
+        seed_rows.append(row)
+    if not seed_rows:
+        return
+    with (tables_dir / "per_seed_results.csv").open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=union_fieldnames(seed_rows))
+        writer.writeheader()
+        writer.writerows(seed_rows)
 
-    rc_rows = []
-    for curve_path in sorted((run_root / "metrics").glob("*/*/*/*/*_multi_trial/multi_trial_curves.csv")):
-        parts = curve_path.relative_to(run_root / "metrics").parts
-        if allowed_methods is not None and parts[2] not in allowed_methods:
+    id_keys = ["dataset", "arch", "method", "variant"]
+    skip_keys = set(id_keys) | {"seed", "checkpoint"}
+    groups: dict[tuple, list[dict]] = {}
+    for row in seed_rows:
+        groups.setdefault(tuple(row[k] for k in id_keys), []).append(row)
+    summary_rows = []
+    for key, rows in groups.items():
+        out = dict(zip(id_keys, key))
+        out["n_seeds"] = len(rows)
+        out["seeds"] = " ".join(sorted(r["seed"] for r in rows))
+        for metric in rows[0]:
+            if metric in skip_keys:
+                continue
+            values = [to_float(r.get(metric)) for r in rows]
+            if any(v is None for v in values):
+                continue
+            out[f"{metric}_mean"], out[f"{metric}_std"] = mean_std(values)
+        summary_rows.append(out)
+    with (tables_dir / "main_results_mean_std.csv").open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=union_fieldnames(summary_rows))
+        writer.writeheader()
+        writer.writerows(summary_rows)
+
+    rc_groups: dict[tuple, dict[str, list[float]]] = {}
+    for curve_path in sorted(metrics_root.glob("*/*/*/*/seed_*/last/risk_coverage.csv")):
+        dataset, arch, method, variant, seed_dir = curve_path.relative_to(metrics_root).parts[:5]
+        if method not in methods or seed_dir not in allowed_seeds:
             continue
         with curve_path.open(newline="") as f:
             for row in csv.DictReader(f):
-                row.update({"dataset": parts[0], "arch": parts[1], "method": parts[2], "variant": parts[3], "checkpoint_eval": parts[4]})
-                rc_rows.append(row)
+                bucket = rc_groups.setdefault((dataset, arch, method, variant, row["coverage"]), {"risk": [], "accuracy": []})
+                bucket["risk"].append(float(row["risk"]))
+                bucket["accuracy"].append(float(row["accuracy"]))
+    rc_rows = []
+    for (dataset, arch, method, variant, coverage), bucket in rc_groups.items():
+        risk_mean, risk_std = mean_std(bucket["risk"])
+        acc_mean, acc_std = mean_std(bucket["accuracy"])
+        rc_rows.append({
+            "dataset": dataset, "arch": arch, "method": method, "variant": variant, "coverage": coverage,
+            "n_seeds": len(bucket["risk"]), "risk_mean": risk_mean, "risk_std": risk_std,
+            "accuracy_mean": acc_mean, "accuracy_std": acc_std,
+        })
     if rc_rows:
-        with (tables_dir / "risk_coverage_table.csv").open("w", newline="") as f:
+        with (tables_dir / "risk_coverage_mean_std.csv").open("w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=union_fieldnames(rc_rows))
             writer.writeheader()
             writer.writerows(rc_rows)
@@ -355,25 +374,17 @@ def main():
 
     for entry in entries:
         for method in args.methods:
-            cmd, checkpoint_dir, variant = train_command(args, run_root, entry.slug, method)
-            checkpoint = checkpoint_dir / f"{args.multi_trial_checkpoint}.pt"
-            eval_commands = [] if args.skip_multi_trial else eval_commands_for_method(args, run_root, entry.slug, method, variant, checkpoint)
-            summary_paths = [output_dir / "multi_trial_summary.csv" for _, output_dir, _ in eval_commands]
-            if args.skip_existing and checkpoint.exists() and (args.skip_multi_trial or all(path.exists() for path in summary_paths)):
-                log_skip(f"SKIP existing {entry.slug}/{method}/{variant}", commands_file)
-                continue
-            run_command(cmd, commands_file, args.dry_run)
-            if args.skip_multi_trial:
-                continue
-            for eval_cmd, output_dir, eval_variant in eval_commands:
-                summary_path = output_dir / "multi_trial_summary.csv"
-                if args.skip_existing and summary_path.exists():
-                    log_skip(f"SKIP existing multi-trial {entry.slug}/{method}/{eval_variant}", commands_file)
-                    continue
-                run_command(eval_cmd, commands_file, args.dry_run)
+            for variant in method_variants(args, method):
+                for seed in args.seeds:
+                    cmd, checkpoint_dir = train_command(args, run_root, entry.slug, method, variant, seed)
+                    summary = run_root / "metrics" / entry.slug / args.arch / method / variant / f"seed_{seed}" / "last" / "summary.csv"
+                    if args.skip_existing and (checkpoint_dir / "last.pt").exists() and summary.exists():
+                        log_skip(f"SKIP existing {entry.slug}/{method}/{variant}/seed_{seed}", commands_file)
+                        continue
+                    run_command(cmd, commands_file, args.dry_run)
 
     if not args.dry_run:
-        aggregate_tables(run_root)
+        aggregate_tables(run_root, args.methods, args.seeds)
     print(f"Paper medical suite outputs: {run_root}")
 
 

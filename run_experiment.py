@@ -57,7 +57,7 @@ def parse_args():
     parser.add_argument("--chexpert-frontal-only", action="store_true", help="Use only frontal CheXpert images")
     parser.add_argument("--chexpert-stats-samples", type=int, default=None, help="Optional train-image limit for CheXpert mean/std computation")
 
-    parser.add_argument("--method", default="scsf", choices=["scsf", "ds_scsf", "ds_scsf_v2", "sr", "dg", "sat", "selectivenet", "ccl_sc", "residual_head", "dp_head", "spatial_head"])
+    parser.add_argument("--method", default="scsf", choices=["scsf", "ds_scsf", "ds_scsf_v2", "sr", "dg", "sat", "selectivenet", "ccl_sc", "residual_head", "dp_head", "spatial_head", "dualaug"])
     parser.add_argument("--arch", default="vgg16_bn", choices=["vgg16_bn", "resnet18", "resnet50", "resnet101", "densenet121"])
     parser.add_argument("--pretrained", action="store_true", help="Use torchvision ImageNet weights for ResNet/DenseNet")
     parser.add_argument("--epochs", type=int, default=100)
@@ -147,17 +147,22 @@ def parse_args():
         help="Class weighting for DS-SCSF auxiliary CE and calibrator BCE",
     )
     parser.add_argument("--ds-class-balance-beta", type=float, default=0.9999, help="Beta for effective-number class weights")
-    parser.add_argument("--reward", type=float, default=2.2)
+    parser.add_argument("--reward", type=float, default=None, help="Deep Gamblers o (1 < o < classes); default min(2.2, (1 + classes) / 2)")
     parser.add_argument("--sat-momentum", type=float, default=0.9)
     parser.add_argument("--target-coverage", type=float, default=0.8)
     parser.add_argument("--selectivenet-alpha", type=float, default=0.5)
     parser.add_argument("--selectivenet-lambda", type=float, default=32.0)
     parser.add_argument("--ccl-weight", type=float, default=0.5)
-    parser.add_argument("--ccl-temperature", type=float, default=0.07)
+    parser.add_argument("--ccl-temperature", type=float, default=0.1)
     parser.add_argument("--ccl-base-temperature", type=float, default=0.10)
     parser.add_argument("--ccl-queue-size", type=int, default=300)
     parser.add_argument("--ccl-momentum", type=float, default=0.999)
-    parser.add_argument("--ccl-require-full-queue", action="store_true")
+    parser.add_argument(
+        "--ccl-variant",
+        default="official",
+        choices=["official", "paper"],
+        help="official: reproduce lamda-bbo/CCL-SC code (which produced the paper's numbers); paper: CSC loss as written in the paper",
+    )
     # --- Proposed method hyperparameters ---
     parser.add_argument("--agree-weight", type=float, default=1.0, help="BCE agreement loss weight for residual_head/dp_head/spatial_head")
     parser.add_argument("--min-agree-weight", type=float, default=1e-4, help="Minimum BCE weight after cosine decay")
@@ -194,6 +199,8 @@ def train_one_epoch(model, loader, optimizer, meta_optimizer, scaler, device, ep
     def has_grad(opt):
         return any(p.grad is not None for group in opt.param_groups for p in group["params"])
 
+    if hasattr(model, "on_epoch_start"):
+        model.on_epoch_start(epoch, args)
     for batch in loader:
         inputs, targets, indices = unpack_batch(batch, device)
         optimizer.zero_grad(set_to_none=True)
@@ -323,7 +330,7 @@ def metrics_root_for(args, checkpoint_name: str, save_root: Path) -> Path:
     if args.metrics_dir is None:
         return save_root
     if args.output_layout == "paper":
-        return Path(args.metrics_dir) / args.dataset / args.arch / args.method / args.variant / checkpoint_name
+        return Path(args.metrics_dir) / args.dataset / args.arch / args.method / args.variant / f"seed_{args.seed}" / checkpoint_name
     return Path(args.metrics_dir) / args.dataset / args.method / args.arch / checkpoint_name
 
 
@@ -363,7 +370,7 @@ def write_rich_evaluation(args, save_root: Path, checkpoint_name: str, logits: t
         write_plots(
             metrics_root / "risk_coverage.csv",
             metrics_root / "roc_curve.csv",
-            Path(args.figures_dir) / args.dataset,
+            Path(args.figures_dir) / args.dataset / f"seed_{args.seed}",
             args.dataset,
             args.method,
             args.variant,
@@ -452,7 +459,7 @@ def main():
         return
 
     model = build_method(args, num_classes=num_classes, input_size=spec.input_size, train_size=len(loaders["train"].dataset)).to(device)
-    if args.method == "scsf":
+    if args.method in {"scsf", "dualaug"}:
         backbone_params = [p for name, p in model.named_parameters() if not name.startswith("calibrator.")]
         optimizer = optim.SGD(backbone_params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
         meta_optimizer = optim.Adam(model.calibrator.parameters(), lr=args.meta_lr)
@@ -521,7 +528,22 @@ def main():
             "CCL-SC hparams: "
             f"pretrain={args.pretrain} weight={args.ccl_weight} "
             f"T={args.ccl_temperature} queue={args.ccl_queue_size} "
-            f"momentum_encoder={args.ccl_momentum} require_full_queue={args.ccl_require_full_queue}"
+            f"momentum_encoder={args.ccl_momentum} variant={args.ccl_variant}"
+        )
+    if args.method == "dualaug":
+        print(
+            "dualaug hparams: "
+            f"pretrain={args.pretrain} feature_spec={args.scsf_feature_spec} hidden_dim={args.hidden_dim} "
+            f"lambda={args.meta_weight_mode}({args.init_meta_weight}->{args.min_meta_weight}) meta_lr={args.meta_lr}"
+        )
+    if args.method == "dg":
+        print(f"DG hparams: pretrain={args.pretrain} reward={args.reward}")
+    if args.method == "sat":
+        print(f"SAT hparams: pretrain={args.pretrain} momentum={args.sat_momentum}")
+    if args.method == "selectivenet":
+        print(
+            f"SelectiveNet hparams: target_coverage={args.target_coverage} "
+            f"alpha={args.selectivenet_alpha} lambda={args.selectivenet_lambda}"
         )
     if args.method in FAITHFULNESS_NOTES:
         print(f"Faithfulness note: {FAITHFULNESS_NOTES[args.method]}")
@@ -586,9 +608,9 @@ def main():
         },
         save_root / "last.pt",
     )
-    logits, targets, confidence = collect_outputs(model, loaders["test"], device)
+    logits, targets, confidence = collect_outputs(model, loaders["test_full"], device)
     test_summary, test_curve = write_rich_evaluation(args, save_root, "last", logits, targets, confidence)
-    write_fusion_diagnostics(args, model, loaders["test"], device, metrics_root_for(args, "last", save_root), "last")
+    write_fusion_diagnostics(args, model, loaders["test_full"], device, metrics_root_for(args, "last", save_root), "last")
     val_logits, val_targets, val_confidence = collect_outputs(model, loaders["val"], device)
     write_rich_evaluation(args, save_root, "val_last", val_logits, val_targets, val_confidence)
     write_fusion_diagnostics(args, model, loaders["val"], device, metrics_root_for(args, "val_last", save_root), "val_last")

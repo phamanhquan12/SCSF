@@ -8,7 +8,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from .models import FeatureModel, build_backbone
+from .models import FeatureModel, VGGFeatureModel, build_backbone
 
 
 FAITHFULNESS_NOTES = {
@@ -16,7 +16,8 @@ FAITHFULNESS_NOTES = {
     "dg": "Deep Gamblers follows NIPS2019DeepGamblers/main.py: C+1 output, softmax reservation neuron, loss=-log(p_y + reservation/reward).",
     "sat": "SAT follows SAT-selective-cls/loss.py SelfAdativeTraining: momentum target history plus a reservation probability 1-p_y.",
     "selectivenet": "SelectiveNet follows selectivenet/models/*_vgg_selectivenet.py: class head, sigmoid selection head, auxiliary head, coverage penalty lambda=32.",
-    "ccl_sc": "CCL-SC follows CCL-SC/train_CCL_SC.py and CCL-SC/moco/CSC.py: CE/SAT backbone with supervised contrastive consistency after pretrain.",
+    "dualaug": "dualaug: train_fresh_sc.py dualaug on a torchvision backbone; VGG pool4/pool5 are replaced by pooled mid/late stages, the head gets the input LayerNorm of the SCSF calibrator, and there is no gradient clipping (no method in run_experiment.py clips).",
+    "ccl_sc": "CCL-SC: --ccl-variant official reproduces lamda-bbo/CCL-SC train_CCL_SC.py + moco/CSC.py (per-epoch key EMA, queues frozen once full, max-shifted loss); --ccl-variant paper uses the paper's CSC loss with MoCo-style per-step updates.",
 }
 
 
@@ -69,9 +70,9 @@ class SoftmaxResponseMethod(BackboneMethod):
 class DeepGamblersMethod(BackboneMethod):
     def forward(self, x: torch.Tensor) -> MethodBatchOutput:
         logits_plus, _ = self._backbone_logits_features(x)
-        probs = F.softmax(logits_plus, dim=1)
         class_logits = logits_plus[:, : self.num_classes]
-        confidence = 1.0 - probs[:, -1]
+        # logit(1 - p_abstain): same ranking as 1 - p_abstain without fp32 saturation ties.
+        confidence = torch.logsumexp(class_logits.float(), dim=1) - logits_plus[:, -1].float()
         return MethodBatchOutput(logits_plus, class_logits, confidence, logits_plus.new_zeros(()))
 
     def training_loss(self, output, targets, indices, epoch, args):
@@ -147,10 +148,12 @@ class SelectiveNetMethod(BackboneMethod):
     def forward(self, x: torch.Tensor) -> MethodBatchOutput:
         _, features = self._backbone_logits_features(x)
         logits = self.classifier(features)
-        selection = self.selector(features).squeeze(1)
+        selection_logit = self.selector[0](features).squeeze(1)
+        selection = self.selector[1](selection_logit)
         aux_logits = self.aux_classifier(features)
         packed = torch.cat([logits, selection.unsqueeze(1)], dim=1)
-        return MethodBatchOutput(packed, logits, selection, aux_logits, features=features)
+        # Rank by the pre-sigmoid selector logit: same order, no ties at exactly 1.0.
+        return MethodBatchOutput(packed, logits, selection_logit.float(), aux_logits, features=features)
 
     def training_loss(self, output, targets, indices, epoch, args):
         logits = output.train_logits[:, : self.num_classes]
@@ -282,7 +285,8 @@ class SCSFMethod(BackboneMethod):
         meta_confidence = torch.sigmoid(meta_logits.float()).to(logits.dtype)
         sr_confidence = F.softmax(logits.float(), dim=1).max(dim=1).values.to(logits.dtype)
         if self.scorer == "meta":
-            confidence = meta_confidence
+            # Rank by the raw logit: sigmoid saturates to exactly 1.0 in fp32 (logit > ~17), creating ties.
+            confidence = meta_logits.float()
         elif self.scorer == "sr":
             confidence = sr_confidence
         elif self.scorer == "meta_sr_product":
@@ -890,8 +894,63 @@ class DSSCSFv2Method(BackboneMethod):
         return loss + float(getattr(args, "ds_aux_cal_weight", 1.0)) * meta_weight * combined_meta
 
 
+class DualAugMethod(SCSFMethod):
+    """dualaug (port of train_fresh_sc.py --variant dualaug).
+
+    Loss = 0.5 * [CE(x) + CE(flip(x))] + lambda_t * BCE(head, 1[argmax f(x) == argmax f(flip(x))]).
+    The head is the SCSF calibrator on pooled mid+late features (gradient flows into the backbone)
+    and stop-gradient logits. lambda_t is 0 during warm-up, then cosine-decays init -> min meta weight.
+    Test inputs are scored by the raw head logit (single view, no flip).
+    """
+
+    def __init__(self, backbone: FeatureModel, num_classes: int, hidden_dim: int = 256, calibrator_arch: str = "standard"):
+        super().__init__(backbone, num_classes, hidden_dim=hidden_dim, use_logits=True, scorer="meta", calibrator_arch=calibrator_arch)
+
+    def forward(self, x: torch.Tensor) -> MethodBatchOutput:
+        logits, features = self._backbone_logits_features(x)
+        meta_logits = self.calibrator(features, logits)
+        aux_outputs = None
+        if self.training:
+            aux_outputs = {"flip_logits": self.backbone(x.flip(-1))}
+        return MethodBatchOutput(
+            logits,
+            logits,
+            meta_logits.float(),
+            logits.new_zeros(()),
+            features=features,
+            meta_logits=meta_logits,
+            aux_outputs=aux_outputs,
+        )
+
+    def training_loss(self, output, targets, indices, epoch, args):
+        logits = output.train_logits
+        flip_logits = output.aux_outputs["flip_logits"]
+        ce = 0.5 * (F.cross_entropy(logits, targets) + F.cross_entropy(flip_logits, targets))
+        if epoch <= args.pretrain:
+            return ce
+        with torch.no_grad():
+            agree = logits.argmax(dim=1).eq(flip_logits.argmax(dim=1)).float()
+        with torch.amp.autocast("cuda", enabled=False):
+            bce = F.binary_cross_entropy_with_logits(output.meta_logits.float(), agree)
+        return ce + self._meta_weight(epoch, args) * bce
+
+
 class CCLSCMethod(BackboneMethod):
-    """CCL-SC adapter with momentum encoder and correct/error feature queues."""
+    """CCL-SC (Wu et al., ICML 2024) with a momentum encoder and correct/error feature queues.
+
+    variant="official" reproduces lamda-bbo/CCL-SC (train_CCL_SC.py, moco/CSC.py), which produced
+    the paper's numbers:
+      - key encoder copied from the online model when warm-up ends, then EMA-updated once per epoch;
+      - queues filled only after warm-up and frozen once both are full;
+      - per-positive loss logsumexp(l - max(l)) - s_p with l = sims / tau (the max shift is never
+        added back and s_p is not divided by tau).
+    variant="paper" implements the CSC loss as written in the paper (Eq. 6):
+      - key encoder copied when warm-up ends, then EMA-updated every step (MoCo);
+      - queues updated FIFO every step after warm-up;
+      - per-positive loss logsumexp(l) - s_p / tau.
+    Both variants start the CSC term only once both queues are full, weight each anchor by its
+    detached softmax response divided by its number of positives, and score test inputs by SR.
+    """
 
     def __init__(
         self,
@@ -902,9 +961,11 @@ class CCLSCMethod(BackboneMethod):
         momentum: float,
         temperature: float,
         base_temperature: float,
-        require_full_queue: bool,
+        variant: str = "official",
     ):
         super().__init__(backbone, num_classes)
+        if variant not in {"official", "paper"}:
+            raise ValueError(f"Unknown CCL-SC variant: {variant}")
         self.key_backbone = key_backbone
         self.key_backbone.load_state_dict(self.backbone.state_dict())
         for param in self.key_backbone.parameters():
@@ -914,9 +975,17 @@ class CCLSCMethod(BackboneMethod):
         self.momentum = momentum
         self.temperature = temperature
         self.base_temperature = base_temperature
-        self.require_full_queue = require_full_queue
+        self.variant = variant
+        self._epoch = 0
+        self._key_initialized = False
 
-        feature_dim = backbone.feature_dim
+        # Official VGG16-BN embedding: output of classifier[:3] (Linear -> ReLU -> BatchNorm1d).
+        self._vgg_projection = isinstance(backbone, VGGFeatureModel)
+        if self._vgg_projection:
+            first_linear = next(m for m in backbone.base.classifier.modules() if isinstance(m, nn.Linear))
+            feature_dim = first_linear.out_features
+        else:
+            feature_dim = backbone.feature_dim
         self.register_buffer("correct_queue", F.normalize(torch.randn(queue_size, feature_dim), dim=1))
         self.register_buffer("error_queue", F.normalize(torch.randn(queue_size, feature_dim), dim=1))
         self.register_buffer("correct_queue_labels", torch.full((queue_size,), -1, dtype=torch.long))
@@ -926,10 +995,37 @@ class CCLSCMethod(BackboneMethod):
         self.register_buffer("correct_queue_full", torch.zeros(1, dtype=torch.bool))
         self.register_buffer("error_queue_full", torch.zeros(1, dtype=torch.bool))
 
+    def _encode(self, model: FeatureModel, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._vgg_projection:
+            flat = model.forward_features(x)
+            layers = list(model.base.classifier.children())
+            projection = nn.Sequential(*layers[:3])(flat)
+            logits = nn.Sequential(*layers[3:])(projection)
+            return logits, projection
+        return model(x, return_features=True)
+
+    def _past_warmup(self, args) -> bool:
+        return self._epoch > args.pretrain
+
+    @torch.no_grad()
+    def _copy_key_encoder(self):
+        for online_param, key_param in zip(self.backbone.parameters(), self.key_backbone.parameters()):
+            key_param.data.copy_(online_param.data)
+        self._key_initialized = True
+
     @torch.no_grad()
     def _momentum_update_key_encoder(self):
         for online_param, key_param in zip(self.backbone.parameters(), self.key_backbone.parameters()):
             key_param.data.mul_(self.momentum).add_(online_param.data, alpha=1.0 - self.momentum)
+
+    def on_epoch_start(self, epoch: int, args):
+        self._epoch = epoch
+        if epoch <= args.pretrain:
+            return
+        if not self._key_initialized:
+            self._copy_key_encoder()
+        elif self.variant == "official":
+            self._momentum_update_key_encoder()
 
     @torch.no_grad()
     def _enqueue(self, features: torch.Tensor, labels: torch.Tensor, prefix: str):
@@ -973,55 +1069,46 @@ class CCLSCMethod(BackboneMethod):
         size = int(ptr.item())
         return queue[:size], labels[:size]
 
-    def _queues_ready(self) -> bool:
-        if self.require_full_queue:
-            return bool(self.correct_queue_full.item()) and bool(self.error_queue_full.item())
-        correct_features, _ = self._queue_view("correct")
-        error_features, _ = self._queue_view("error")
-        return correct_features.size(0) > 0 and error_features.size(0) > 0
+    def _queues_full(self) -> bool:
+        return bool(self.correct_queue_full.item()) and bool(self.error_queue_full.item())
 
-    def _csc_loss(self, logits: torch.Tensor, features: torch.Tensor, targets: torch.Tensor) -> Optional[torch.Tensor]:
-        correct_features, correct_labels = self._queue_view("correct")
-        error_features, error_labels = self._queue_view("error")
-        if correct_features.size(0) == 0 or error_features.size(0) == 0:
-            return None
-
+    def csc_loss(self, logits: torch.Tensor, features: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """CSC loss over the full queues; anchors without positives contribute zero."""
         q = F.normalize(features, dim=1)
-        sr = F.softmax(logits, dim=1).max(dim=1).values.detach().clamp_min(1e-6)
-        losses = []
-        for i in range(targets.size(0)):
-            target = targets[i]
-            pos_mask = correct_labels.eq(target)
-            if not bool(pos_mask.any()):
-                continue
-            neg_mask = error_labels.eq(target)
-            positive_sim = q[i : i + 1] @ correct_features[pos_mask].t()
-            if bool(neg_mask.any()):
-                negative_sim = q[i : i + 1] @ error_features[neg_mask].t()
-            else:
-                negative_sim = q.new_empty(1, 0)
+        sr = F.softmax(logits, dim=1).max(dim=1).values.detach()
 
-            positive_sim = positive_sim.squeeze(0)
-            negative_sim = negative_sim.squeeze(0)
-            pos_count = positive_sim.numel()
-            for positive in positive_sim:
-                contrast_logits = torch.cat([positive.view(1), negative_sim], dim=0) / self.temperature
-                logsumexp = torch.logsumexp(contrast_logits, dim=0)
-                losses.append((logsumexp - positive) * sr[i] / pos_count)
+        # Snapshot: the queues are updated in place before backward() in the paper variant.
+        pos_sim = q @ self.correct_queue.clone().t()
+        pos_mask = targets.view(-1, 1).eq(self.correct_queue_labels.view(1, -1))
+        neg_sim = q @ self.error_queue.clone().t()
+        neg_mask = targets.view(-1, 1).eq(self.error_queue_labels.view(1, -1))
+        # Same masking constant as the official code: exp() underflows to 0 with zero gradient.
+        neg_logits = neg_sim.masked_fill(~neg_mask, -1e9) / self.temperature
+        neg_lse = torch.logsumexp(neg_logits, dim=1, keepdim=True)
 
-        if not losses:
-            return None
-        return (self.temperature / self.base_temperature) * torch.stack(losses).sum() / targets.size(0)
+        pos_logits = pos_sim / self.temperature
+        lse = torch.logaddexp(pos_logits, neg_lse)
+        if self.variant == "official":
+            row_max = torch.maximum(pos_logits, neg_logits.max(dim=1, keepdim=True).values)
+            per_positive = (lse - row_max) - pos_sim
+        else:
+            per_positive = lse - pos_logits
+
+        pos_count = pos_mask.sum(dim=1, keepdim=True).clamp_min(1)
+        weights = pos_mask.float() * (sr.view(-1, 1) / pos_count)
+        loss = (per_positive * weights).sum() / targets.size(0)
+        return (self.temperature / self.base_temperature) * loss
 
     def forward(self, x: torch.Tensor) -> MethodBatchOutput:
-        logits, features = self._backbone_logits_features(x)
+        logits, features = self._encode(self.backbone, x)
         confidence = F.softmax(logits, dim=1).max(dim=1).values
         key_logits = None
         key_features = None
-        if self.training:
-            self._momentum_update_key_encoder()
+        if self.training and self._key_initialized:
+            if self.variant == "paper":
+                self._momentum_update_key_encoder()
             with torch.no_grad():
-                key_logits, key_features = self.key_backbone(x, return_features=True)
+                key_logits, key_features = self._encode(self.key_backbone, x)
         return MethodBatchOutput(
             logits,
             logits,
@@ -1034,23 +1121,26 @@ class CCLSCMethod(BackboneMethod):
 
     def training_loss(self, output, targets, indices, epoch, args):
         ce = F.cross_entropy(output.train_logits, targets)
-        if output.features is None or output.key_logits is None or output.key_features is None:
+        if not self._past_warmup(args) or output.key_logits is None:
             return ce
 
-        csc_loss = None
-        if epoch > args.pretrain and args.ccl_weight > 0 and self._queues_ready():
-            csc_loss = self._csc_loss(output.train_logits, output.features, targets)
+        queues_full = self._queues_full()
+        csc = None
+        if queues_full and args.ccl_weight > 0:
+            with torch.amp.autocast("cuda", enabled=False):
+                csc = self.csc_loss(output.train_logits.float(), output.features.float(), targets)
 
-        with torch.no_grad():
-            key_features = F.normalize(output.key_features, dim=1)
-            key_predictions = output.key_logits.argmax(dim=1)
-            key_correct = key_predictions.eq(targets)
-            self._enqueue(key_features[key_correct], key_predictions[key_correct], "correct")
-            self._enqueue(key_features[~key_correct], key_predictions[~key_correct], "error")
+        if self.variant == "paper" or not queues_full:
+            with torch.no_grad():
+                key_features = F.normalize(output.key_features, dim=1)
+                key_predictions = output.key_logits.argmax(dim=1)
+                key_correct = key_predictions.eq(targets)
+                self._enqueue(key_features[key_correct], key_predictions[key_correct], "correct")
+                self._enqueue(key_features[~key_correct], key_predictions[~key_correct], "error")
 
-        if csc_loss is None:
+        if csc is None:
             return ce
-        return ce + args.ccl_weight * csc_loss
+        return ce + args.ccl_weight * csc
 
 
 class ResidualHeadMethod(BackboneMethod):
@@ -1336,12 +1426,21 @@ class SpatialHeadMethod(BackboneMethod):
         return ce_loss + current_weight * bce_loss
 
 
+def resolve_dg_reward(reward: float | None, num_classes: int) -> float:
+    """Deep Gamblers requires 1 < o < num_classes; None picks min(2.2, (1 + num_classes) / 2)."""
+    if reward is None:
+        return min(2.2, (1.0 + num_classes) / 2.0)
+    if not 1.0 < reward < num_classes:
+        raise ValueError(f"Deep Gamblers reward must satisfy 1 < o < {num_classes}, got {reward}")
+    return reward
+
+
 def build_method(args, num_classes: int, input_size: int, train_size: int) -> ExperimentMethod:
     method_name = args.method
     model_classes = num_classes + 1 if method_name in {"dg", "sat"} else num_classes
     scsf_feature_spec = getattr(args, "scsf_feature_spec", "mid+late+logits")
     supports_scsf_feature_spec = args.arch in {"resnet18", "resnet50", "resnet101", "densenet121"}
-    uses_scsf_features = method_name in {"scsf", "ds_scsf", "ds_scsf_v2"} and supports_scsf_feature_spec
+    uses_scsf_features = method_name in {"scsf", "ds_scsf", "ds_scsf_v2", "dualaug"} and supports_scsf_feature_spec
     backbone = build_backbone(
         args.arch,
         model_classes,
@@ -1354,6 +1453,7 @@ def build_method(args, num_classes: int, input_size: int, train_size: int) -> Ex
     if method_name == "sr":
         return SoftmaxResponseMethod(backbone, num_classes)
     if method_name == "dg":
+        args.reward = resolve_dg_reward(args.reward, num_classes)
         return DeepGamblersMethod(backbone, num_classes)
     if method_name == "sat":
         return SATMethod(backbone, num_classes, train_size, args.sat_momentum)
@@ -1369,6 +1469,13 @@ def build_method(args, num_classes: int, input_size: int, train_size: int) -> Ex
             sr_alpha=getattr(args, "scsf_sr_alpha", 0.5),
             calibrator_arch=getattr(args, "calibrator_arch", "standard"),
             train_size=train_size,
+        )
+    if method_name == "dualaug":
+        return DualAugMethod(
+            backbone,
+            num_classes,
+            hidden_dim=args.hidden_dim,
+            calibrator_arch=getattr(args, "calibrator_arch", "standard"),
         )
     if method_name == "ds_scsf":
         parts = [part.strip() for part in scsf_feature_spec.split("+") if part.strip()]
@@ -1407,7 +1514,7 @@ def build_method(args, num_classes: int, input_size: int, train_size: int) -> Ex
             momentum=args.ccl_momentum,
             temperature=args.ccl_temperature,
             base_temperature=args.ccl_base_temperature,
-            require_full_queue=args.ccl_require_full_queue,
+            variant=args.ccl_variant,
         )
     if method_name == "residual_head":
         return ResidualHeadMethod(
