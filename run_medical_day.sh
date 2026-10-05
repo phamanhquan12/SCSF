@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # run_medical_day.sh
-# Run the thesis medical suite one day-sized batch at a time (shared GPU server).
+# Run the thesis medical suite one method per day (shared GPU server).
 #
 # All days write into the same run (results/paper/medical_suite/$RUN_ID) with
 # --skip-existing, so an interrupted day resumes where it stopped and tables/
@@ -14,12 +14,9 @@
 #   bash run_medical_day.sh aggregate         # rebuild tables/ only
 #   Extra args are forwarded to run_medical_suite.sh (e.g. --gpu 0 --workers 16).
 #
-# Plan (seed-major: seed 0 is complete after day 3, seed 1 after day 6, ...):
-#   group A: covid_qu_ex
-#   group B: malaria_microscopic brain_tumor_mri_masoud breast_ultrasound chest_ct_scan
-#   group C: ham10000 aptos2019
-#   day 1-3 = seed 0 x groups A,B,C; day 4-6 = seed 1; day 7-9 = seed 2.
-#   Each day is 7 methods x its datasets (about 6 H100-hours per day).
+# Plan: day N = METHODS[N] on every dataset in datasets_thesis.md x seeds 0 1 2
+# (7 datasets x 3 seeds = 21 runs per day). dualaug does two forward passes per
+# step, so its day takes roughly twice as long as the others.
 # =============================================================================
 
 set -euo pipefail
@@ -29,25 +26,19 @@ cd "$SCRIPT_DIR"
 
 RUN_ID="${RUN_ID:-thesis}"
 RESULTS_ROOT="${RESULTS_ROOT:-$SCRIPT_DIR/results/paper/medical_suite}"
-DATASET_GROUPS=(
-    "covid_qu_ex"
-    "malaria_microscopic brain_tumor_mri_masoud breast_ultrasound chest_ct_scan"
-    "ham10000 aptos2019"
-)
+METHODS=(sr dualaug ccl_sc scsf sat dg selectivenet)
 SEEDS=(0 1 2)
-METHODS=(sr ccl_sc sat dg selectivenet scsf dualaug)
-NUM_DAYS=$(( ${#SEEDS[@]} * ${#DATASET_GROUPS[@]} ))
+DATASETS=(covid_qu_ex ham10000 malaria_microscopic aptos2019 brain_tumor_mri_masoud breast_ultrasound chest_ct_scan)
+NUM_DAYS=${#METHODS[@]}
 METRICS_DIR="$RESULTS_ROOT/$RUN_ID/metrics"
 
-day_seed()     { echo "${SEEDS[$(( ($1 - 1) / ${#DATASET_GROUPS[@]} ))]}"; }
-day_datasets() { echo "${DATASET_GROUPS[$(( ($1 - 1) % ${#DATASET_GROUPS[@]} ))]}"; }
+day_method() { echo "${METHODS[$(( $1 - 1 ))]}"; }
 
 day_done_count() {
-    local seed datasets count=0 ds method
-    seed="$(day_seed "$1")"
-    datasets="$(day_datasets "$1")"
-    for ds in $datasets; do
-        for method in "${METHODS[@]}"; do
+    local method count=0 ds seed
+    method="$(day_method "$1")"
+    for ds in "${DATASETS[@]}"; do
+        for seed in "${SEEDS[@]}"; do
             if compgen -G "$METRICS_DIR/$ds/*/$method/*/seed_$seed/last/summary.csv" > /dev/null; then
                 count=$(( count + 1 ))
             fi
@@ -56,7 +47,7 @@ day_done_count() {
     echo "$count"
 }
 
-day_total() { local n; n=$(day_datasets "$1" | wc -w); echo $(( n * ${#METHODS[@]} )); }
+day_total() { echo $(( ${#DATASETS[@]} * ${#SEEDS[@]} )); }
 
 find_python() {
     if [[ -n "${VIRTUAL_ENV:-}" ]]; then echo "$VIRTUAL_ENV/bin/python"
@@ -69,8 +60,7 @@ print_status() {
     echo "Run: $RESULTS_ROOT/$RUN_ID"
     local day
     for (( day = 1; day <= NUM_DAYS; day++ )); do
-        printf "day %d  seed %s  %2d/%2d runs  %s\n" \
-            "$day" "$(day_seed "$day")" "$(day_done_count "$day")" "$(day_total "$day")" "$(day_datasets "$day")"
+        printf "day %d  %-12s %2d/%2d runs\n" "$day" "$(day_method "$day")" "$(day_done_count "$day")" "$(day_total "$day")"
     done
 }
 
@@ -80,15 +70,14 @@ run_day() {
         echo "Day must be between 1 and $NUM_DAYS" >&2
         exit 1
     fi
-    echo "=== Day $day: seed $(day_seed "$day"), datasets: $(day_datasets "$day") ==="
-    # shellcheck disable=SC2046
+    echo "=== Day $day: $(day_method "$day") on ${#DATASETS[@]} datasets x seeds ${SEEDS[*]} ==="
     bash "$SCRIPT_DIR/run_medical_suite.sh" \
         --run-id "$RUN_ID" \
         --results-root "$RESULTS_ROOT" \
         --skip-existing \
-        --methods "${METHODS[@]}" \
-        --seeds "$(day_seed "$day")" \
-        --datasets $(day_datasets "$day") \
+        --methods "$(day_method "$day")" \
+        --seeds "${SEEDS[@]}" \
+        --datasets "${DATASETS[@]}" \
         "$@"
     echo "=== Day $day finished: $(day_done_count "$day")/$(day_total "$day") runs ==="
 }
