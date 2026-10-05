@@ -35,6 +35,7 @@ def parse_args():
     parser.add_argument("--results-root", default="results/paper/medical_suite")
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--methods", nargs="+", default=DEFAULT_METHODS)
+    parser.add_argument("--datasets", nargs="+", default=None, help="Subset of dataset slugs from --datasets-file")
     parser.add_argument("--arch", default="resnet50", choices=["vgg16_bn", "resnet18", "resnet50", "resnet101", "densenet121"])
     parser.add_argument("--input-size", type=int, default=224)
     parser.add_argument("--download", action="store_true")
@@ -64,6 +65,7 @@ def parse_args():
     parser.add_argument("--scsf-scorer", default="meta", choices=["meta", "sr", "meta_sr_product", "meta_sr_blend", "geometric", "meta_agreement", "min_sr_meta", "margin", "energy", "doctor"])
     parser.add_argument("--scsf-sr-alpha", type=float, default=0.5)
     parser.add_argument("--skip-existing", action="store_true")
+    parser.add_argument("--aggregate-only", action="store_true", help="Rebuild tables/ from finished runs without training")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--pretrained", action="store_true", help="Use ImageNet pretrained weights for ResNet/DenseNet")
     # --- Proposed method hyperparameters ---
@@ -286,18 +288,18 @@ def to_float(value):
         return None
 
 
-def aggregate_tables(run_root: Path, methods: list[str], seeds: list[int]):
-    """Per-seed results plus mean/std (ddof=1) across training seeds, all on the full test set."""
+def aggregate_tables(run_root: Path):
+    """Per-seed results plus mean/std (ddof=1) across training seeds, all on the full test set.
+
+    Covers every finished run under run_root, so tables accumulate across partial (daily) invocations.
+    """
     metrics_root = run_root / "metrics"
-    allowed_seeds = {f"seed_{seed}" for seed in seeds}
     tables_dir = run_root / "tables"
     tables_dir.mkdir(parents=True, exist_ok=True)
 
     seed_rows = []
     for summary_path in sorted(metrics_root.glob("*/*/*/*/seed_*/last/summary.csv")):
         dataset, arch, method, variant, seed_dir = summary_path.relative_to(metrics_root).parts[:5]
-        if method not in methods or seed_dir not in allowed_seeds:
-            continue
         with summary_path.open(newline="") as f:
             row = next(csv.DictReader(f))
         row.update({"dataset": dataset, "arch": arch, "method": method, "variant": variant, "seed": seed_dir.removeprefix("seed_")})
@@ -335,8 +337,6 @@ def aggregate_tables(run_root: Path, methods: list[str], seeds: list[int]):
     rc_groups: dict[tuple, dict[str, list[float]]] = {}
     for curve_path in sorted(metrics_root.glob("*/*/*/*/seed_*/last/risk_coverage.csv")):
         dataset, arch, method, variant, seed_dir = curve_path.relative_to(metrics_root).parts[:5]
-        if method not in methods or seed_dir not in allowed_seeds:
-            continue
         with curve_path.open(newline="") as f:
             for row in csv.DictReader(f):
                 bucket = rc_groups.setdefault((dataset, arch, method, variant, row["coverage"]), {"risk": [], "accuracy": []})
@@ -361,9 +361,18 @@ def aggregate_tables(run_root: Path, methods: list[str], seeds: list[int]):
 def main():
     args = parse_args()
     entries = parse_datasets_to_run(args.datasets_file)
+    if args.datasets:
+        unknown = set(args.datasets) - {entry.slug for entry in entries}
+        if unknown:
+            raise SystemExit(f"--datasets not in {args.datasets_file}: {sorted(unknown)}")
+        entries = [entry for entry in entries if entry.slug in args.datasets]
     run_id = args.run_id or datetime.now().strftime("%Y%m%d_%H%M%S")
     run_root = Path(args.results_root) / run_id
     run_root.mkdir(parents=True, exist_ok=True)
+    if args.aggregate_only:
+        aggregate_tables(run_root)
+        print(f"Tables rebuilt: {run_root / 'tables'}")
+        return
     write_run_config(args, run_root, entries)
     commands_file = run_root / "config" / "commands.txt"
     if not args.skip_existing:
@@ -384,7 +393,7 @@ def main():
                     run_command(cmd, commands_file, args.dry_run)
 
     if not args.dry_run:
-        aggregate_tables(run_root, args.methods, args.seeds)
+        aggregate_tables(run_root)
     print(f"Paper medical suite outputs: {run_root}")
 
 
