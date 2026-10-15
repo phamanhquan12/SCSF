@@ -27,6 +27,16 @@
 #             with their matched controls; days 1-3 run active and detached features (42 runs).
 #             Use the same RUN_ID as the baselines so tables/ compares them directly:
 #             DAY_PLAN=proposals bash run_medical_day.sh next --gpu 0
+#   ds        single-view deep supervision (docs/medical_deep_supervision_method_proposals (1).md):
+#             mg_scsf, mp_ds, se_ds Full candidates, 21 runs per day:
+#             DAY_PLAN=ds bash run_medical_day.sh next --gpu 0
+#   ds_controls  matched controls for the ds plan: All-DS-detached (days 1-3), mechanism controls
+#             (mg CE head, mp K=1, se GAP; days 4-6) and mg_scsf with only the margin branch detached (day 7).
+#   ds_l34    mp_ds/se_ds reading layer3+layer4 like SCSF (days 1-2) and their All-DS-detached runs (days 3-4).
+#
+# DAY_DATASETS / DAY_SEEDS override the dataset and seed lists (status counts follow them), e.g. the
+# first screen on one dataset and seed:
+#   DAY_PLAN=ds DAY_DATASETS="ham10000" DAY_SEEDS="0" bash run_medical_day.sh next --gpu 0
 # =============================================================================
 
 set -euo pipefail
@@ -37,8 +47,8 @@ cd "$SCRIPT_DIR"
 RUN_ID="${RUN_ID:-thesis}"
 RESULTS_ROOT="${RESULTS_ROOT:-$SCRIPT_DIR/results/paper/medical_suite}"
 DAY_PLAN="${DAY_PLAN:-thesis}"
-SEEDS=(0 1 2)
-DATASETS=(covid_qu_ex ham10000 malaria_microscopic aptos2019 brain_tumor_mri_masoud breast_ultrasound chest_ct_scan)
+read -r -a SEEDS <<< "${DAY_SEEDS:-0 1 2}"
+read -r -a DATASETS <<< "${DAY_DATASETS:-covid_qu_ex ham10000 malaria_microscopic aptos2019 brain_tumor_mri_masoud breast_ultrasound chest_ct_scan}"
 
 # Per day: method, run_paper_medical_suite.py flags selecting its variants, and the variant
 # directories that must be complete (empty: any variant counts, as in the thesis baselines).
@@ -76,8 +86,57 @@ case "$DAY_PLAN" in
             "default target-agreement__detached target-correctness__active target-correctness__detached"
         )
         ;;
+    ds)
+        PLAN_METHODS=(mg_scsf mp_ds se_ds)
+        PLAN_FLAGS=(
+            "--ds-detach-modes none --mg-losses hinge"
+            "--ds-detach-modes none --mp-prototypes 3"
+            "--ds-detach-modes none --se-pools topk"
+        )
+        PLAN_VARIANTS=(
+            "l3-hinge-m0.2__w0.1r5__detach-none"
+            "l3-k3-d128-t0.1__w0.1r5__detach-none"
+            "l3-topk0.2__w0.1r5__detach-none"
+        )
+        ;;
+    ds_controls)
+        PLAN_METHODS=(mg_scsf mp_ds se_ds mg_scsf mp_ds se_ds mg_scsf)
+        PLAN_FLAGS=(
+            "--ds-detach-modes all --mg-losses hinge"
+            "--ds-detach-modes all --mp-prototypes 3"
+            "--ds-detach-modes all --se-pools topk"
+            "--ds-detach-modes none --mg-losses ce"
+            "--ds-detach-modes none --mp-prototypes 1"
+            "--ds-detach-modes none --se-pools gap"
+            "--ds-detach-modes new --mg-losses hinge"
+        )
+        PLAN_VARIANTS=(
+            "l3-hinge-m0.2__w0.1r5__detach-all"
+            "l3-k3-d128-t0.1__w0.1r5__detach-all"
+            "l3-topk0.2__w0.1r5__detach-all"
+            "l3-ce-s10__w0.1r5__detach-none"
+            "l3-k1-d128-t0.1__w0.1r5__detach-none"
+            "l3-gap__w0.1r5__detach-none"
+            "l3-hinge-m0.2__w0.1r5__detach-new"
+        )
+        ;;
+    ds_l34)
+        PLAN_METHODS=(mp_ds se_ds mp_ds se_ds)
+        PLAN_FLAGS=(
+            "--ds-sites layer3+layer4 --ds-detach-modes none --mp-prototypes 3"
+            "--ds-sites layer3+layer4 --ds-detach-modes none --se-pools topk"
+            "--ds-sites layer3+layer4 --ds-detach-modes all --mp-prototypes 3"
+            "--ds-sites layer3+layer4 --ds-detach-modes all --se-pools topk"
+        )
+        PLAN_VARIANTS=(
+            "l34-k3-d128-t0.1__w0.1r5__detach-none"
+            "l34-topk0.2__w0.1r5__detach-none"
+            "l34-k3-d128-t0.1__w0.1r5__detach-all"
+            "l34-topk0.2__w0.1r5__detach-all"
+        )
+        ;;
     *)
-        echo "Unknown DAY_PLAN '$DAY_PLAN' (use thesis, new or proposals)" >&2
+        echo "Unknown DAY_PLAN '$DAY_PLAN' (use thesis, new, proposals, ds, ds_controls or ds_l34)" >&2
         exit 1
         ;;
 esac

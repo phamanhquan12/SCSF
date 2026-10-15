@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 import math
 from typing import Optional
@@ -20,6 +21,9 @@ FAITHFULNESS_NOTES = {
     "dualaug_correctness": "dualaug_correctness: dualaug with head target a0*(0.5+0.5*a1), a_i = 1[view i correct] (proposal C); --aux-detach detaches the head's pooled features.",
     "verify_global": "verify_global: proposal A; two-view CE + class-conditioned verifier MLP([GAP(layer3), e_c]) (embed 16, hidden 128), weight 0 in warm-up then --verify-weight; scored by u(x, argmax z).",
     "verify_spatial": "verify_spatial: proposal B; two-view CE + Conv1x1(layer3) -> C evidence maps, top-20% spatial mean (or GAP control); scored by u(x, argmax z).",
+    "mg_scsf": "mg_scsf: SCSF (TCP head, Adam, cosine lambda, raw-logit score) + training-only margin-gated cosine classifier on GAP(layer3), alpha 0->--ds-aux-weight over --ds-aux-ramp epochs after warm-up; single-view CE.",
+    "mp_ds": "mp_ds: single-view CE + K normalised prototypes per class on a bias-free 128-d projection of GAP(--ds-site: layer3, layer4 or both concatenated), CE(a/0.1, y); scored by the prototype support margin of the final prediction.",
+    "se_ds": "se_ds: single-view CE + Conv1x1 class evidence maps on --ds-site (layer3, layer4, or layer3 + upsampled layer4), top-20% (or GAP control) pooling, CE(a, y); scored by the evidence margin of the final prediction.",
     "ccl_sc": "CCL-SC: --ccl-variant official reproduces lamda-bbo/CCL-SC train_CCL_SC.py + moco/CSC.py (per-epoch key EMA, queues frozen once full, max-shifted loss); --ccl-variant paper uses the paper's CSC loss with MoCo-style per-step updates.",
 }
 
@@ -907,8 +911,11 @@ class AuxGradLogMixin:
     def on_epoch_start(self, epoch: int, args):
         self._grad_log_pending = epoch > args.pretrain
 
-    def _maybe_log_aux_grad(self, aux_loss: torch.Tensor, epoch: int):
-        if not getattr(self, "_grad_log_pending", False) or not aux_loss.requires_grad:
+    def _maybe_log_aux_grad(self, losses: torch.Tensor | dict[str, torch.Tensor], epoch: int):
+        """losses: the auxiliary loss, or {name: loss term} to log each term's gradient norms separately."""
+        if not isinstance(losses, dict):
+            losses = {"aux": losses}
+        if not getattr(self, "_grad_log_pending", False) or not any(loss.requires_grad for loss in losses.values()):
             return
         self._grad_log_pending = False
         blocks = {name: getattr(self.backbone, name) for name in ("layer2", "layer3", "layer4") if hasattr(self.backbone, name)}
@@ -916,13 +923,19 @@ class AuxGradLogMixin:
             return
         params = {name: [p for p in block.parameters() if p.requires_grad] for name, block in blocks.items()}
         flat = [p for group in params.values() for p in group]
-        grads = torch.autograd.grad(aux_loss, flat, retain_graph=True, allow_unused=True)
-        row = {"epoch": epoch, "aux_loss": float(aux_loss.detach())}
-        offset = 0
-        for name, group in params.items():
-            squared = sum(float(g.float().pow(2).sum()) for g in grads[offset : offset + len(group)] if g is not None)
-            row[f"{name}_aux_grad_norm"] = squared ** 0.5
-            offset += len(group)
+        row = {"epoch": epoch}
+        for term, loss in losses.items():
+            row[f"{term}_loss"] = float(loss.detach())
+            grads = (
+                torch.autograd.grad(loss, flat, retain_graph=True, allow_unused=True)
+                if loss.requires_grad
+                else [None] * len(flat)
+            )
+            offset = 0
+            for name, group in params.items():
+                squared = sum(float(g.float().pow(2).sum()) for g in grads[offset : offset + len(group)] if g is not None)
+                row[f"{name}_{term}_grad_norm"] = squared ** 0.5
+                offset += len(group)
         self.aux_grad_log.append(row)
         print("aux grad norms: " + " ".join(f"{k}={v:.3e}" for k, v in row.items() if k.endswith("norm")))
 
@@ -1134,6 +1147,363 @@ class VerifySpatialMethod(_ClassVerifierBase):
             return evidence.mean(dim=2)
         k = max(1, math.ceil(self.topk_fraction * evidence.size(2)))
         return evidence.topk(k, dim=2).values.mean(dim=2)
+
+
+# --- Single-view deep supervision (docs/medical_deep_supervision_method_proposals (1).md) ---
+# none: auxiliary gradients enter the backbone; all: every auxiliary branch reads detached features
+# (All-DS-detached); new: only the new branch is detached (MG-SCSF control; SCSF's TCP path stays active).
+DS_DETACH_MODES = ("none", "all", "new")
+DS_EPS = 1e-6
+
+
+def ds_aux_coefficient(epoch: int, args) -> float:
+    """alpha_e = w * min(1, max(0, (e - pretrain) / ramp)), epochs numbered from one."""
+    ramp = max(1, int(getattr(args, "ds_aux_ramp", 5)))
+    return float(getattr(args, "ds_aux_weight", 0.1)) * min(1.0, max(0.0, (epoch - args.pretrain) / ramp))
+
+
+def _unit(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    return F.normalize(x.float(), dim=dim, eps=DS_EPS)
+
+
+def class_margin(scores: torch.Tensor, classes: torch.Tensor) -> torch.Tensor:
+    """scores[c] - max_{c' != c} scores[c'] for the given class of every row."""
+    own = scores.gather(1, classes.unsqueeze(1)).squeeze(1)
+    others = scores.scatter(1, classes.unsqueeze(1), float("-inf")).max(dim=1).values
+    return own - others
+
+
+@contextmanager
+def isolated_init_rng(seed: int):
+    """Initialise auxiliary parameters from their own CPU RNG stream, leaving the global stream untouched,
+    so controls with different heads keep the backbone initialisation, data order and augmentations."""
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(seed)
+        yield
+
+
+def _fp32_region(device: torch.device):
+    return torch.amp.autocast("cuda", enabled=False) if device.type == "cuda" else nullcontext()
+
+
+class DSDiagnosticsMixin(AuxGradLogMixin):
+    """Per-epoch training diagnostics, summed on device during the epoch and flushed to aux_diagnostics."""
+
+    def _init_ds_logs(self):
+        self.aux_grad_log: list[dict] = []
+        self.aux_diagnostics: list[dict] = []
+        self._diag_sums: dict[str, torch.Tensor] = {}
+        self._diag_epoch = 0
+
+    def on_epoch_start(self, epoch: int, args):
+        super().on_epoch_start(epoch, args)
+        self.flush_diagnostics()
+        self._diag_epoch = epoch
+
+    @torch.no_grad()
+    def _accumulate(self, **values: torch.Tensor):
+        for key, value in values.items():
+            value = value.detach().float()
+            self._diag_sums[key] = self._diag_sums[key] + value if key in self._diag_sums else value
+
+    def flush_diagnostics(self):
+        if not self._diag_sums:
+            return
+        sums = {key: value.cpu() for key, value in self._diag_sums.items()}
+        self._diag_sums = {}
+        row = {"epoch": self._diag_epoch}
+        row.update(self._diagnostic_row(sums))
+        self.aux_diagnostics.append(row)
+
+    def _diagnostic_row(self, sums: dict[str, torch.Tensor]) -> dict:
+        raise NotImplementedError
+
+    @staticmethod
+    def _ratio(numerator: torch.Tensor, denominator: torch.Tensor) -> float:
+        return float(numerator / denominator) if float(denominator) > 0 else float("nan")
+
+    def _accumulate_disagreement(self, aux_scores: torch.Tensor, logits: torch.Tensor, targets: torch.Tensor):
+        pred = logits.argmax(dim=1)
+        correct = pred.eq(targets).float()
+        disagree = aux_scores.argmax(dim=1).ne(pred).float()
+        self._accumulate(
+            n_correct=correct.sum(),
+            n_wrong=(1.0 - correct).sum(),
+            disagree_correct=(disagree * correct).sum(),
+            disagree_wrong=(disagree * (1.0 - correct)).sum(),
+        )
+
+    def _disagreement_row(self, sums: dict[str, torch.Tensor]) -> dict:
+        return {
+            "final_aux_disagree_given_correct": self._ratio(sums["disagree_correct"], sums["n_correct"]),
+            "final_aux_disagree_given_wrong": self._ratio(sums["disagree_wrong"], sums["n_wrong"]),
+        }
+
+
+def _require_resnet(backbone: FeatureModel, method: str):
+    if not hasattr(backbone, "forward_with_maps") or not getattr(backbone, "_is_resnet", False):
+        raise ValueError(f"{method} needs a ResNet backbone (layer3 feature map).")
+
+
+class MGSCSFMethod(DSDiagnosticsMixin, SCSFMethod):
+    """MG-SCSF: SCSF plus a training-only, margin-gated cosine classifier on GAP(layer3).
+
+    u_c = <normalize(GAP(layer3)), normalize(w_c)>, d = u_y - max_{c != y} u_c,
+    L = CE(z, y) + lambda_e BCE(s_SCSF, sg[p_y]) + alpha_e mean([max(0, margin - d)]^2).
+    loss="ce" is the mechanism control CE(ce_scale * u, y) with the identical branch and schedule.
+    SCSF keeps its calibrator (Adam), TCP target and cosine lambda; inference uses the raw SCSF logit.
+    """
+
+    def __init__(
+        self,
+        backbone: FeatureModel,
+        num_classes: int,
+        hidden_dim: int = 256,
+        use_logits: bool = True,
+        calibrator_arch: str = "standard",
+        train_size: int = 0,
+        loss: str = "hinge",
+        margin: float = 0.2,
+        ce_scale: float = 10.0,
+        detach: str = "none",
+        init_seed: int = 0,
+    ):
+        super().__init__(
+            backbone,
+            num_classes,
+            hidden_dim=hidden_dim,
+            use_logits=use_logits,
+            scorer="meta",
+            calibrator_arch=calibrator_arch,
+            train_size=train_size,
+        )
+        _require_resnet(backbone, "mg_scsf")
+        if loss not in {"hinge", "ce"}:
+            raise ValueError(f"Unknown mg_scsf loss '{loss}'")
+        if detach not in DS_DETACH_MODES:
+            raise ValueError(f"Unknown detach mode '{detach}'; choose from {DS_DETACH_MODES}")
+        self.loss = loss
+        self.margin = margin
+        self.ce_scale = ce_scale
+        self.detach = detach
+        with isolated_init_rng(init_seed):
+            self.margin_weight = nn.Parameter(torch.empty(num_classes, backbone.layer3_dim))
+            nn.init.kaiming_uniform_(self.margin_weight, a=math.sqrt(5))
+        self._init_ds_logs()
+
+    def _margin_scores(self, layer3: torch.Tensor) -> torch.Tensor:
+        if self.detach != "none":
+            layer3 = layer3.detach()
+        with _fp32_region(layer3.device):
+            pooled = F.adaptive_avg_pool2d(layer3.float(), (1, 1)).flatten(1)
+            return _unit(pooled) @ _unit(self.margin_weight).t()
+
+    def forward(self, x: torch.Tensor) -> MethodBatchOutput:
+        logits, features, maps = self.backbone.forward_with_maps(x)
+        meta_logits = self.calibrator(features.detach() if self.detach == "all" else features, logits)
+        aux_outputs = {"margin_scores": self._margin_scores(maps["mid"])} if self.training else None
+        return MethodBatchOutput(
+            logits,
+            logits,
+            meta_logits.float(),
+            logits.new_zeros(()),
+            features=features,
+            meta_logits=meta_logits,
+            aux_outputs=aux_outputs,
+        )
+
+    def training_loss(self, output, targets, indices, epoch, args):
+        total = SCSFMethod.training_loss(self, output, targets, indices, epoch, args)
+        alpha = ds_aux_coefficient(epoch, args)
+        if alpha <= 0.0:
+            return total
+        scores = output.aux_outputs["margin_scores"]
+        with _fp32_region(scores.device):
+            margins = class_margin(scores, targets)
+            if self.loss == "hinge":
+                aux = F.relu(self.margin - margins).pow(2).mean()
+            else:
+                aux = F.cross_entropy(self.ce_scale * scores, targets)
+        onehot = F.one_hot(targets, self.num_classes).float()
+        active = margins.lt(self.margin).float()
+        self._accumulate(
+            class_count=onehot.sum(0),
+            class_active=(onehot * active.unsqueeze(1)).sum(0),
+            class_margin=(onehot * margins.unsqueeze(1)).sum(0),
+        )
+        ce = F.cross_entropy(output.train_logits, targets)
+        self._maybe_log_aux_grad({"ce": ce, "tcp": total - ce, "margin": alpha * aux}, epoch)
+        return total + alpha * aux
+
+    def _diagnostic_row(self, sums):
+        count = sums["class_count"]
+        row = {
+            "active_frac": self._ratio(sums["class_active"].sum(), count.sum()),
+            "mean_margin": self._ratio(sums["class_margin"].sum(), count.sum()),
+        }
+        for c in range(self.num_classes):
+            row[f"class{c}_active_frac"] = self._ratio(sums["class_active"][c], count[c])
+            row[f"class{c}_mean_margin"] = self._ratio(sums["class_margin"][c], count[c])
+        return row
+
+
+# Backbone stages read by the mp_ds/se_ds branch; layer3+layer4 mirrors SCSF's mid+late features.
+DS_SITES = {"layer3": ("mid",), "layer4": ("late",), "layer3+layer4": ("mid", "late")}
+
+
+class _LabelEvidenceDSBase(DSDiagnosticsMixin, BackboneMethod):
+    """Single-view CE plus a class-label-supervised branch on layer3, layer4 or both (MP-DS, SE-DS).
+
+    L = CE(z(x), y) + alpha_e CE(a(x) / temperature, y). Inference keeps argmax z and scores it with
+    s(x) = a_yhat - max_{c != yhat} a_c (the final prediction, never the branch's own argmax).
+    detach="all" feeds the branch detached stage maps (All-DS-detached).
+    With a layer4 site the auxiliary loss also reaches layer4, i.e. the classifier's input features.
+    """
+
+    temperature = 1.0
+
+    def __init__(self, backbone: FeatureModel, num_classes: int, detach: str, method: str, site: str = "layer3"):
+        super().__init__(backbone, num_classes)
+        _require_resnet(backbone, method)
+        if num_classes < 2:
+            raise ValueError(f"{method} needs at least two classes.")
+        if detach not in {"none", "all"}:
+            raise ValueError(f"{method} supports --ds-detach none or all, got '{detach}'")
+        if site not in DS_SITES:
+            raise ValueError(f"Unknown --ds-site '{site}'; choose from {tuple(DS_SITES)}")
+        self.detach = detach
+        self.site = site
+        self.site_stages = DS_SITES[site]
+        self.site_dim = sum(backbone._stage_dims[stage] for stage in self.site_stages)
+        self._init_ds_logs()
+
+    def _branch(self, stage_maps: list[torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Class scores under key "scores" (plus optional extras) from the site's maps, in float32."""
+        raise NotImplementedError
+
+    def forward(self, x: torch.Tensor) -> MethodBatchOutput:
+        logits, features, maps = self.backbone.forward_with_maps(x)
+        stage_maps = [maps[stage].detach() if self.detach == "all" else maps[stage] for stage in self.site_stages]
+        with _fp32_region(logits.device):
+            branch = self._branch([stage_map.float() for stage_map in stage_maps])
+        confidence = class_margin(branch["scores"], logits.argmax(dim=1))
+        return MethodBatchOutput(logits, logits, confidence, logits.new_zeros(()), features=features, aux_outputs=branch)
+
+    def training_loss(self, output, targets, indices, epoch, args):
+        ce = F.cross_entropy(output.train_logits, targets)
+        alpha = ds_aux_coefficient(epoch, args)
+        if alpha <= 0.0:
+            return ce
+        scores = output.aux_outputs["scores"]
+        with _fp32_region(scores.device):
+            aux = F.cross_entropy(scores / self.temperature, targets)
+        self._accumulate_disagreement(scores, output.train_logits, targets)
+        self._accumulate_branch(output.aux_outputs, targets)
+        self._maybe_log_aux_grad({"ce": ce, "aux": alpha * aux}, epoch)
+        return ce + alpha * aux
+
+    def _accumulate_branch(self, branch: dict[str, torch.Tensor], targets: torch.Tensor):
+        pass
+
+    def _diagnostic_row(self, sums):
+        return self._disagreement_row(sums)
+
+
+class MPDSMethod(_LabelEvidenceDSBase):
+    """MP-DS: K learned, normalised prototypes per class on v = normalize(W h) (W bias-free, 128-d), where h is
+    GAP(layer3), GAP(layer4) or their concatenation (--ds-site).
+
+    a_c = max_k <v, normalize(p_ck)>, L_MP = CE(a / 0.1, y); prototypes are jointly optimised (no clustering,
+    memory bank, occupancy balancing or restarts). K=1 is the mechanism control.
+    """
+
+    def __init__(
+        self,
+        backbone: FeatureModel,
+        num_classes: int,
+        prototypes: int = 3,
+        dim: int = 128,
+        temperature: float = 0.1,
+        detach: str = "none",
+        init_seed: int = 0,
+        site: str = "layer3",
+    ):
+        super().__init__(backbone, num_classes, detach, "mp_ds", site=site)
+        if prototypes < 1:
+            raise ValueError("--mp-prototypes must be >= 1")
+        self.num_prototypes = prototypes
+        self.temperature = temperature
+        with isolated_init_rng(init_seed):
+            self.proto_proj = nn.Linear(self.site_dim, dim, bias=False)
+            self.prototypes = nn.Parameter(torch.randn(num_classes, prototypes, dim))
+
+    def _branch(self, stage_maps):
+        pooled = torch.cat([F.adaptive_avg_pool2d(stage_map, (1, 1)).flatten(1) for stage_map in stage_maps], dim=1)
+        sims = torch.einsum("bd,ckd->bck", _unit(self.proto_proj(pooled)), _unit(self.prototypes))
+        return {"scores": sims.max(dim=2).values, "sims": sims}
+
+    def _accumulate_branch(self, branch, targets):
+        own = branch["sims"][torch.arange(targets.size(0), device=targets.device), targets]
+        selected = own.argmax(dim=1)
+        occupancy = torch.zeros(self.num_classes, self.num_prototypes, device=targets.device)
+        occupancy.index_put_((targets, selected), torch.ones_like(selected, dtype=torch.float), accumulate=True)
+        self._accumulate(center_occupancy=occupancy)
+
+    @torch.no_grad()
+    def _diagnostic_row(self, sums):
+        row = self._disagreement_row(sums)
+        occupancy = sums["center_occupancy"]
+        prototypes = _unit(self.prototypes.detach()).cpu()
+        for c in range(self.num_classes):
+            total = occupancy[c].sum()
+            for k in range(self.num_prototypes):
+                row[f"class{c}_center{k}_occupancy"] = self._ratio(occupancy[c, k], total)
+            row[f"class{c}_unused_centers"] = int((occupancy[c] == 0).sum())
+            if self.num_prototypes > 1:
+                cosine = prototypes[c] @ prototypes[c].t()
+                off_diagonal = cosine[~torch.eye(self.num_prototypes, dtype=torch.bool)]
+                row[f"class{c}_center_cos"] = float(off_diagonal.mean())
+        return row
+
+
+class SEDSMethod(_LabelEvidenceDSBase):
+    """SE-DS: A = Conv1x1(H) (with bias) in R^{C x H x W}; a_c = mean of the top ceil(0.2 HW) values of A_c,
+    L_SE = CE(a, y). pool="gap" (spatial mean, same convolution) is the mechanism control. Raw scores, no sigmoid.
+
+    H is layer3, layer4, or (layer3+layer4) layer3 concatenated with layer4 nearest-upsampled to layer3's grid,
+    so the evidence is Conv(layer3) + upsample(Conv(layer4)) at the finer resolution.
+    """
+
+    def __init__(
+        self,
+        backbone: FeatureModel,
+        num_classes: int,
+        pool: str = "topk",
+        topk_fraction: float = 0.2,
+        detach: str = "none",
+        init_seed: int = 0,
+        site: str = "layer3",
+    ):
+        super().__init__(backbone, num_classes, detach, "se_ds", site=site)
+        if pool not in {"topk", "gap"}:
+            raise ValueError(f"Unknown se_ds pool '{pool}'")
+        if not 0.0 < topk_fraction <= 1.0:
+            raise ValueError("--se-topk-fraction must be in (0, 1]")
+        self.pool = pool
+        self.topk_fraction = topk_fraction
+        with isolated_init_rng(init_seed):
+            self.evidence_conv = nn.Conv2d(self.site_dim, num_classes, kernel_size=1, bias=True)
+
+    def _branch(self, stage_maps):
+        size = stage_maps[0].shape[-2:]
+        stacked = torch.cat(
+            [m if m.shape[-2:] == size else F.interpolate(m, size=size, mode="nearest") for m in stage_maps], dim=1
+        )
+        evidence = self.evidence_conv(stacked).flatten(2)
+        if self.pool == "gap":
+            return {"scores": evidence.mean(dim=2)}
+        k = max(1, math.ceil(self.topk_fraction * evidence.size(2)))
+        return {"scores": evidence.topk(k, dim=2).values.mean(dim=2)}
 
 
 class CCLSCMethod(BackboneMethod):
@@ -1641,7 +2011,7 @@ def build_method(args, num_classes: int, input_size: int, train_size: int) -> Ex
     model_classes = num_classes + 1 if method_name in {"dg", "sat"} else num_classes
     scsf_feature_spec = getattr(args, "scsf_feature_spec", "mid+late+logits")
     supports_scsf_feature_spec = args.arch in {"resnet18", "resnet50", "resnet101", "densenet121"}
-    uses_scsf_features = method_name in {"scsf", "ds_scsf", "ds_scsf_v2", "dualaug", "dualaug_correctness"} and supports_scsf_feature_spec
+    uses_scsf_features = method_name in {"scsf", "ds_scsf", "ds_scsf_v2", "dualaug", "dualaug_correctness", "mg_scsf"} and supports_scsf_feature_spec
     backbone = build_backbone(
         args.arch,
         model_classes,
@@ -1697,6 +2067,42 @@ def build_method(args, num_classes: int, input_size: int, train_size: int) -> Ex
             topk_fraction=args.verify_topk_fraction,
             loss=args.verify_loss,
             detach_features=args.aux_detach,
+        )
+    ds_init_seed = int(args.seed) + 104729
+    if method_name == "mg_scsf":
+        return MGSCSFMethod(
+            backbone,
+            num_classes,
+            hidden_dim=args.hidden_dim,
+            use_logits="logits" in scsf_feature_spec.split("+"),
+            calibrator_arch=getattr(args, "calibrator_arch", "standard"),
+            train_size=train_size,
+            loss=args.mg_loss,
+            margin=args.mg_margin,
+            ce_scale=args.mg_ce_scale,
+            detach=args.ds_detach,
+            init_seed=ds_init_seed,
+        )
+    if method_name == "mp_ds":
+        return MPDSMethod(
+            backbone,
+            num_classes,
+            prototypes=args.mp_prototypes,
+            dim=args.mp_dim,
+            temperature=args.mp_temperature,
+            detach=args.ds_detach,
+            init_seed=ds_init_seed,
+            site=args.ds_site,
+        )
+    if method_name == "se_ds":
+        return SEDSMethod(
+            backbone,
+            num_classes,
+            pool=args.se_pool,
+            topk_fraction=args.se_topk_fraction,
+            detach=args.ds_detach,
+            init_seed=ds_init_seed,
+            site=args.ds_site,
         )
     if method_name == "ds_scsf":
         parts = [part.strip() for part in scsf_feature_spec.split("+") if part.strip()]

@@ -97,6 +97,22 @@ def parse_args():
     parser.add_argument("--verify-embed-dim", type=int, default=16)
     parser.add_argument("--verify-hidden-dim", type=int, default=128)
     parser.add_argument("--verify-topk-fraction", type=float, default=0.2)
+    # --- Single-view deep supervision (mg_scsf, mp_ds, se_ds); each listed value becomes a variant directory ---
+    parser.add_argument("--ds-detach-modes", nargs="+", default=["none"], choices=["none", "all", "new"],
+                        help="none: full DS; all: All-DS-detached; new: detach only mg_scsf's margin branch "
+                             "(skipped for mp_ds/se_ds, where it equals all)")
+    parser.add_argument("--ds-sites", nargs="+", default=["layer3"], choices=["layer3", "layer4", "layer3+layer4"],
+                        help="mp_ds/se_ds branch sites (mg_scsf's margin branch is always layer3)")
+    parser.add_argument("--mg-losses", nargs="+", default=["hinge"], choices=["hinge", "ce"])
+    parser.add_argument("--mp-prototypes", nargs="+", type=int, default=[3])
+    parser.add_argument("--se-pools", nargs="+", default=["topk"], choices=["topk", "gap"])
+    parser.add_argument("--ds-aux-weight", type=float, default=0.1)
+    parser.add_argument("--ds-aux-ramp", type=int, default=5)
+    parser.add_argument("--mg-margin", type=float, default=0.2)
+    parser.add_argument("--mg-ce-scale", type=float, default=10.0)
+    parser.add_argument("--mp-dim", type=int, default=128)
+    parser.add_argument("--mp-temperature", type=float, default=0.1)
+    parser.add_argument("--se-topk-fraction", type=float, default=0.2)
     return parser.parse_args()
 
 
@@ -213,6 +229,37 @@ def method_variants(args, method: str) -> list[tuple[str, list[str]]]:
             for loss in args.verify_losses
             for mode in args.aux_feature_modes
         ]
+    if method in {"mg_scsf", "mp_ds", "se_ds"}:
+        # Directory = branch site, head setting, coefficient/ramp and gradient mode.
+        schedule = f"w{args.ds_aux_weight:g}r{args.ds_aux_ramp}"
+        site_tags = {"layer3": "l3", "layer4": "l4", "layer3+layer4": "l34"}
+        sites = ["layer3"] if method == "mg_scsf" else args.ds_sites
+        if method == "mg_scsf":
+            heads = [
+                (f"{loss}-m{args.mg_margin:g}" if loss == "hinge" else f"ce-s{args.mg_ce_scale:g}", ["--mg-loss", loss])
+                for loss in args.mg_losses
+            ]
+            modes = args.ds_detach_modes
+        elif method == "mp_ds":
+            heads = [
+                (f"k{k}-d{args.mp_dim}-t{args.mp_temperature:g}", ["--mp-prototypes", str(k)])
+                for k in args.mp_prototypes
+            ]
+            modes = [mode for mode in args.ds_detach_modes if mode != "new"]
+        else:
+            heads = [
+                (f"{pool}{args.se_topk_fraction:g}" if pool == "topk" else pool, ["--se-pool", pool])
+                for pool in args.se_pools
+            ]
+            modes = [mode for mode in args.ds_detach_modes if mode != "new"]
+        variants = []
+        for site in sites:
+            site_flags = [] if method == "mg_scsf" else ["--ds-site", site]
+            for head, flags in heads:
+                for mode in modes:
+                    name = f"{site_tags[site]}-{head}__{schedule}__detach-{mode}"
+                    variants.append((name, [*flags, *site_flags, "--ds-detach", mode]))
+        return variants
     return [("default", [])]
 
 
@@ -312,11 +359,22 @@ def train_command(
             "--meta-lr", str(args.meta_lr),
             "--min-meta-weight", str(args.min_meta_weight),
         ])
+    if method in {"mg_scsf", "mp_ds", "se_ds"}:
+        cmd.extend([
+            "--ds-aux-weight", str(args.ds_aux_weight),
+            "--ds-aux-ramp", str(args.ds_aux_ramp),
+            "--mg-margin", str(args.mg_margin),
+            "--mg-ce-scale", str(args.mg_ce_scale),
+            "--mp-dim", str(args.mp_dim),
+            "--mp-temperature", str(args.mp_temperature),
+            "--se-topk-fraction", str(args.se_topk_fraction),
+        ])
     if method == "dg" and args.dg_reward is not None:
         cmd.extend(["--reward", str(args.dg_reward)])
     if method == "selectivenet":
         cmd.extend(["--target-coverage", str(args.sn_target_coverage)])
-    if method == "scsf":
+    if method in {"scsf", "mg_scsf"}:
+        # mg_scsf inherits the SCSF configuration of the matched baseline.
         cmd.extend(
             [
                 "--scsf-feature-spec",

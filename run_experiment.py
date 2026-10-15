@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import random
+import time
 
 import numpy as np
 import torch
@@ -67,7 +68,7 @@ def parse_args():
         choices=[
             "scsf", "ds_scsf", "ds_scsf_v2", "sr", "dg", "sat", "selectivenet", "ccl_sc",
             "residual_head", "dp_head", "spatial_head", "dualaug", "dualaug_correctness",
-            "verify_global", "verify_spatial",
+            "verify_global", "verify_spatial", "mg_scsf", "mp_ds", "se_ds",
         ],
     )
     parser.add_argument("--arch", default="vgg16_bn", choices=["vgg16_bn", "resnet18", "resnet50", "resnet101", "densenet121"])
@@ -194,6 +195,25 @@ def parse_args():
     parser.add_argument("--verify-hidden-dim", type=int, default=128, help="verify_global: verifier MLP hidden width")
     parser.add_argument("--verify-pool", default="topk", choices=["topk", "gap"], help="verify_spatial: top-k pooling or the GAP control")
     parser.add_argument("--verify-topk-fraction", type=float, default=0.2, help="verify_spatial: k = ceil(fraction * H * W)")
+    # --- Single-view deep supervision (docs/medical_deep_supervision_method_proposals (1).md) ---
+    parser.add_argument("--ds-aux-weight", type=float, default=0.1,
+                        help="mg_scsf/mp_ds/se_ds: auxiliary coefficient reached after the ramp")
+    parser.add_argument("--ds-aux-ramp", type=int, default=5,
+                        help="mg_scsf/mp_ds/se_ds: alpha_e = w * min(1, max(0, (e - pretrain) / ramp))")
+    parser.add_argument("--ds-detach", default="none", choices=["none", "all", "new"],
+                        help="none: full DS; all: every auxiliary branch reads detached features; "
+                             "new: detach only mg_scsf's margin branch (SCSF stays active)")
+    parser.add_argument("--ds-site", default="layer3", choices=["layer3", "layer4", "layer3+layer4"],
+                        help="mp_ds/se_ds: backbone stages read by the auxiliary branch (layer3+layer4 mirrors SCSF's mid+late)")
+    parser.add_argument("--mg-loss", default="hinge", choices=["hinge", "ce"],
+                        help="mg_scsf: squared margin hinge, or the CE(scale * u, y) mechanism control")
+    parser.add_argument("--mg-margin", type=float, default=0.2, help="mg_scsf: cosine margin of the hinge")
+    parser.add_argument("--mg-ce-scale", type=float, default=10.0, help="mg_scsf: logit scale of the CE control")
+    parser.add_argument("--mp-prototypes", type=int, default=3, help="mp_ds: prototypes per class (1 = mechanism control)")
+    parser.add_argument("--mp-dim", type=int, default=128, help="mp_ds: projection dimension")
+    parser.add_argument("--mp-temperature", type=float, default=0.1, help="mp_ds: CE temperature")
+    parser.add_argument("--se-pool", default="topk", choices=["topk", "gap"], help="se_ds: top-k pooling or the GAP control")
+    parser.add_argument("--se-topk-fraction", type=float, default=0.2, help="se_ds: k = ceil(fraction * H * W)")
     return parser.parse_args()
 
 
@@ -334,13 +354,24 @@ def write_aux_grad_log(model, save_root: Path):
     rows = getattr(model, "aux_grad_log", None)
     if rows:
         write_dict_csv(save_root / "aux_grad_norms.csv", rows)
+    if hasattr(model, "flush_diagnostics"):
+        model.flush_diagnostics()
+    diagnostics = getattr(model, "aux_diagnostics", None)
+    if diagnostics:
+        write_dict_csv(save_root / "aux_diagnostics.csv", diagnostics)
 
 
-def write_completion_marker(save_root: Path, args, reused: bool):
+def write_completion_marker(save_root: Path, args, reused: bool, train_seconds: float = 0.0):
     marker = save_root / COMPLETE_MARKER
     tmp = marker.with_name(marker.name + ".tmp")
+    payload = {
+        "finished": datetime.now().isoformat(timespec="seconds"),
+        "evaluation_only": reused,
+        "train_seconds": round(train_seconds, 1),
+        "args": vars(args),
+    }
     tmp.write_text(
-        json.dumps({"finished": datetime.now().isoformat(timespec="seconds"), "evaluation_only": reused, "args": vars(args)}, indent=2),
+        json.dumps(payload, indent=2),
         encoding="utf-8",
     )
     os.replace(tmp, marker)
@@ -530,7 +561,8 @@ def main():
         return
 
     model = build_method(args, num_classes=num_classes, input_size=spec.input_size, train_size=len(loaders["train"].dataset)).to(device)
-    if args.method in {"scsf", "dualaug", "dualaug_correctness"}:
+    if args.method in {"scsf", "dualaug", "dualaug_correctness", "mg_scsf"}:
+        # mg_scsf's margin branch is outside "calibrator." and is trained by backbone SGD.
         backbone_params = [p for name, p in model.named_parameters() if not name.startswith("calibrator.")]
         optimizer = optim.SGD(backbone_params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
         meta_optimizer = optim.Adam(model.calibrator.parameters(), lr=args.meta_lr)
@@ -540,6 +572,11 @@ def main():
         head_params = [p for name, p in model.named_parameters() if name.startswith(head_prefixes)]
         optimizer = optim.SGD(backbone_params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
         meta_optimizer = optim.Adam(head_params, lr=args.meta_lr)
+    elif args.method in {"mp_ds", "se_ds"}:
+        # Backbone SGD settings for the new branch; it has no gradient during warm-up, so SGD leaves it
+        # unstepped (including weight decay) until alpha_e > 0.
+        optimizer = optim.SGD(list(model.parameters()), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
+        meta_optimizer = None
     elif args.method in {"ds_scsf", "ds_scsf_v2"}:
         meta_prefixes = ("calibrators.", "beta_logits", "fusion.")
         backbone_params = [p for name, p in model.named_parameters() if not name.startswith(meta_prefixes)]
@@ -624,6 +661,25 @@ def main():
             f"{args.method} hparams: pretrain={args.pretrain} loss={args.verify_loss} weight={args.verify_weight} "
             f"{shape} meta_lr={args.meta_lr} aux_detach={args.aux_detach}"
         )
+    if args.method in {"mg_scsf", "mp_ds", "se_ds"}:
+        if args.method == "mg_scsf":
+            shape = (
+                f"loss={args.mg_loss} margin={args.mg_margin} ce_scale={args.mg_ce_scale} "
+                f"feature_spec={args.scsf_feature_spec} meta_target={args.scsf_meta_target} "
+                f"lambda={args.meta_weight_mode}({args.init_meta_weight}->{args.min_meta_weight}) meta_lr={args.meta_lr}"
+            )
+        elif args.method == "mp_ds":
+            shape = f"prototypes={args.mp_prototypes} dim={args.mp_dim} temperature={args.mp_temperature}"
+        else:
+            shape = f"pool={args.se_pool} topk_fraction={args.se_topk_fraction}"
+        new_params = sum(
+            p.numel() for name, p in model.named_parameters() if not name.startswith(("backbone.", "calibrator."))
+        )
+        site = "layer3" if args.method == "mg_scsf" else args.ds_site
+        print(
+            f"{args.method} hparams: pretrain={args.pretrain} site={site} alpha={args.ds_aux_weight} "
+            f"ramp={args.ds_aux_ramp} detach={args.ds_detach} {shape} new_params={new_params}"
+        )
     if args.method == "dg":
         print(f"DG hparams: pretrain={args.pretrain} reward={args.reward}")
     if args.method == "sat":
@@ -642,9 +698,14 @@ def main():
     for stale in (COMPLETE_MARKER, LEGACY_LAST_OUTPUT):
         (save_root / stale).unlink(missing_ok=True)
     reused = args.reuse_last and load_last_checkpoint(model, save_root / "last.pt", args, device)
+    train_seconds = 0.0
     for epoch in range(1, 0 if reused else args.epochs + 1):
         freeze_scsf_backbone_if_needed(model, epoch, args)
+        epoch_start = time.perf_counter()
         train_loss, train_acc = train_one_epoch(model, loaders["train"], optimizer, meta_optimizer, scaler, device, epoch, args)
+        epoch_seconds = time.perf_counter() - epoch_start
+        train_seconds += epoch_seconds
+        print(f"Epoch {epoch:03d} train time {epoch_seconds:.1f}s")
         scheduler.step()
         should_eval = args.eval_every <= 1 or epoch % args.eval_every == 0 or epoch == args.epochs
         if should_eval:
@@ -714,7 +775,7 @@ def main():
         f"FPR@95TPR={test_summary.fpr_at_95_tpr:.5f}"
     )
     print(f"Coverage error: {format_curve(test_curve)}")
-    write_completion_marker(save_root, args, reused)
+    write_completion_marker(save_root, args, reused, train_seconds)
 
 
 if __name__ == "__main__":
