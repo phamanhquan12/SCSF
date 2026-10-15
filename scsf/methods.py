@@ -1362,7 +1362,7 @@ class _LabelEvidenceDSBase(DSDiagnosticsMixin, BackboneMethod):
 
     temperature = 1.0
 
-    def __init__(self, backbone: FeatureModel, num_classes: int, detach: str, method: str, site: str = "layer3"):
+    def __init__(self, backbone: FeatureModel, num_classes: int, detach: str, method: str, site: str = "layer3+layer4"):
         super().__init__(backbone, num_classes)
         _require_resnet(backbone, method)
         if num_classes < 2:
@@ -1426,7 +1426,7 @@ class MPDSMethod(_LabelEvidenceDSBase):
         temperature: float = 0.1,
         detach: str = "none",
         init_seed: int = 0,
-        site: str = "layer3",
+        site: str = "layer3+layer4",
     ):
         super().__init__(backbone, num_classes, detach, "mp_ds", site=site)
         if prototypes < 1:
@@ -1482,7 +1482,7 @@ class SEDSMethod(_LabelEvidenceDSBase):
         topk_fraction: float = 0.2,
         detach: str = "none",
         init_seed: int = 0,
-        site: str = "layer3",
+        site: str = "layer3+layer4",
     ):
         super().__init__(backbone, num_classes, detach, "se_ds", site=site)
         if pool not in {"topk", "gap"}:

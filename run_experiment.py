@@ -203,7 +203,7 @@ def parse_args():
     parser.add_argument("--ds-detach", default="none", choices=["none", "all", "new"],
                         help="none: full DS; all: every auxiliary branch reads detached features; "
                              "new: detach only mg_scsf's margin branch (SCSF stays active)")
-    parser.add_argument("--ds-site", default="layer3", choices=["layer3", "layer4", "layer3+layer4"],
+    parser.add_argument("--ds-site", default="layer3+layer4", choices=["layer3", "layer4", "layer3+layer4"],
                         help="mp_ds/se_ds: backbone stages read by the auxiliary branch (layer3+layer4 mirrors SCSF's mid+late)")
     parser.add_argument("--mg-loss", default="hinge", choices=["hinge", "ce"],
                         help="mg_scsf: squared margin hinge, or the CE(scale * u, y) mechanism control")

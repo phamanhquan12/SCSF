@@ -101,7 +101,7 @@ def parse_args():
     parser.add_argument("--ds-detach-modes", nargs="+", default=["none"], choices=["none", "all", "new"],
                         help="none: full DS; all: All-DS-detached; new: detach only mg_scsf's margin branch "
                              "(skipped for mp_ds/se_ds, where it equals all)")
-    parser.add_argument("--ds-sites", nargs="+", default=["layer3"], choices=["layer3", "layer4", "layer3+layer4"],
+    parser.add_argument("--ds-sites", nargs="+", default=["layer3+layer4"], choices=["layer3", "layer4", "layer3+layer4"],
                         help="mp_ds/se_ds branch sites (mg_scsf's margin branch is always layer3)")
     parser.add_argument("--mg-losses", nargs="+", default=["hinge"], choices=["hinge", "ce"])
     parser.add_argument("--mp-prototypes", nargs="+", type=int, default=[3])

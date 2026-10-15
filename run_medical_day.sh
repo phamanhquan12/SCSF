@@ -28,11 +28,12 @@
 #             Use the same RUN_ID as the baselines so tables/ compares them directly:
 #             DAY_PLAN=proposals bash run_medical_day.sh next --gpu 0
 #   ds        single-view deep supervision (docs/medical_deep_supervision_method_proposals (1).md):
-#             mg_scsf, mp_ds, se_ds Full candidates, 21 runs per day:
+#             mg_scsf, mp_ds, se_ds Full candidates, 21 runs per day. mp_ds/se_ds read layer3+layer4
+#             like SCSF (the default site); mg_scsf's margin branch reads layer3:
 #             DAY_PLAN=ds bash run_medical_day.sh next --gpu 0
 #   ds_controls  matched controls for the ds plan: All-DS-detached (days 1-3), mechanism controls
 #             (mg CE head, mp K=1, se GAP; days 4-6) and mg_scsf with only the margin branch detached (day 7).
-#   ds_l34    mp_ds/se_ds reading layer3+layer4 like SCSF (days 1-2) and their All-DS-detached runs (days 3-4).
+#   ds_l3     mp_ds/se_ds on layer3 only, as in the proposal (days 1-2), and their All-DS-detached runs (days 3-4).
 #
 # DAY_DATASETS / DAY_SEEDS override the dataset and seed lists (status counts follow them), e.g. the
 # first screen on one dataset and seed:
@@ -90,53 +91,53 @@ case "$DAY_PLAN" in
         PLAN_METHODS=(mg_scsf mp_ds se_ds)
         PLAN_FLAGS=(
             "--ds-detach-modes none --mg-losses hinge"
-            "--ds-detach-modes none --mp-prototypes 3"
-            "--ds-detach-modes none --se-pools topk"
+            "--ds-sites layer3+layer4 --ds-detach-modes none --mp-prototypes 3"
+            "--ds-sites layer3+layer4 --ds-detach-modes none --se-pools topk"
         )
         PLAN_VARIANTS=(
             "l3-hinge-m0.2__w0.1r5__detach-none"
-            "l3-k3-d128-t0.1__w0.1r5__detach-none"
-            "l3-topk0.2__w0.1r5__detach-none"
+            "l34-k3-d128-t0.1__w0.1r5__detach-none"
+            "l34-topk0.2__w0.1r5__detach-none"
         )
         ;;
     ds_controls)
         PLAN_METHODS=(mg_scsf mp_ds se_ds mg_scsf mp_ds se_ds mg_scsf)
         PLAN_FLAGS=(
             "--ds-detach-modes all --mg-losses hinge"
-            "--ds-detach-modes all --mp-prototypes 3"
-            "--ds-detach-modes all --se-pools topk"
+            "--ds-sites layer3+layer4 --ds-detach-modes all --mp-prototypes 3"
+            "--ds-sites layer3+layer4 --ds-detach-modes all --se-pools topk"
             "--ds-detach-modes none --mg-losses ce"
-            "--ds-detach-modes none --mp-prototypes 1"
-            "--ds-detach-modes none --se-pools gap"
+            "--ds-sites layer3+layer4 --ds-detach-modes none --mp-prototypes 1"
+            "--ds-sites layer3+layer4 --ds-detach-modes none --se-pools gap"
             "--ds-detach-modes new --mg-losses hinge"
         )
         PLAN_VARIANTS=(
             "l3-hinge-m0.2__w0.1r5__detach-all"
-            "l3-k3-d128-t0.1__w0.1r5__detach-all"
-            "l3-topk0.2__w0.1r5__detach-all"
+            "l34-k3-d128-t0.1__w0.1r5__detach-all"
+            "l34-topk0.2__w0.1r5__detach-all"
             "l3-ce-s10__w0.1r5__detach-none"
-            "l3-k1-d128-t0.1__w0.1r5__detach-none"
-            "l3-gap__w0.1r5__detach-none"
+            "l34-k1-d128-t0.1__w0.1r5__detach-none"
+            "l34-gap__w0.1r5__detach-none"
             "l3-hinge-m0.2__w0.1r5__detach-new"
         )
         ;;
-    ds_l34)
+    ds_l3)
         PLAN_METHODS=(mp_ds se_ds mp_ds se_ds)
         PLAN_FLAGS=(
-            "--ds-sites layer3+layer4 --ds-detach-modes none --mp-prototypes 3"
-            "--ds-sites layer3+layer4 --ds-detach-modes none --se-pools topk"
-            "--ds-sites layer3+layer4 --ds-detach-modes all --mp-prototypes 3"
-            "--ds-sites layer3+layer4 --ds-detach-modes all --se-pools topk"
+            "--ds-sites layer3 --ds-detach-modes none --mp-prototypes 3"
+            "--ds-sites layer3 --ds-detach-modes none --se-pools topk"
+            "--ds-sites layer3 --ds-detach-modes all --mp-prototypes 3"
+            "--ds-sites layer3 --ds-detach-modes all --se-pools topk"
         )
         PLAN_VARIANTS=(
-            "l34-k3-d128-t0.1__w0.1r5__detach-none"
-            "l34-topk0.2__w0.1r5__detach-none"
-            "l34-k3-d128-t0.1__w0.1r5__detach-all"
-            "l34-topk0.2__w0.1r5__detach-all"
+            "l3-k3-d128-t0.1__w0.1r5__detach-none"
+            "l3-topk0.2__w0.1r5__detach-none"
+            "l3-k3-d128-t0.1__w0.1r5__detach-all"
+            "l3-topk0.2__w0.1r5__detach-all"
         )
         ;;
     *)
-        echo "Unknown DAY_PLAN '$DAY_PLAN' (use thesis, new, proposals, ds, ds_controls or ds_l34)" >&2
+        echo "Unknown DAY_PLAN '$DAY_PLAN' (use thesis, new, proposals, ds, ds_controls or ds_l3)" >&2
         exit 1
         ;;
 esac
