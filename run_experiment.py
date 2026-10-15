@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+from datetime import datetime
+import json
+import os
 from pathlib import Path
 import random
 
@@ -22,6 +25,7 @@ from scsf.metrics import (
     summarize_selective_metrics,
 )
 from scsf.reporting import coverage_rows, write_dict_csv, write_plots, write_summary_csv
+from scsf.run_status import COMPLETE_MARKER, LEGACY_LAST_OUTPUT
 
 
 SCSF_FEATURE_SPECS = [
@@ -57,7 +61,15 @@ def parse_args():
     parser.add_argument("--chexpert-frontal-only", action="store_true", help="Use only frontal CheXpert images")
     parser.add_argument("--chexpert-stats-samples", type=int, default=None, help="Optional train-image limit for CheXpert mean/std computation")
 
-    parser.add_argument("--method", default="scsf", choices=["scsf", "ds_scsf", "ds_scsf_v2", "sr", "dg", "sat", "selectivenet", "ccl_sc", "residual_head", "dp_head", "spatial_head", "dualaug"])
+    parser.add_argument(
+        "--method",
+        default="scsf",
+        choices=[
+            "scsf", "ds_scsf", "ds_scsf_v2", "sr", "dg", "sat", "selectivenet", "ccl_sc",
+            "residual_head", "dp_head", "spatial_head", "dualaug", "dualaug_correctness",
+            "verify_global", "verify_spatial",
+        ],
+    )
     parser.add_argument("--arch", default="vgg16_bn", choices=["vgg16_bn", "resnet18", "resnet50", "resnet101", "densenet121"])
     parser.add_argument("--pretrained", action="store_true", help="Use torchvision ImageNet weights for ResNet/DenseNet")
     parser.add_argument("--epochs", type=int, default=100)
@@ -84,6 +96,8 @@ def parse_args():
     parser.add_argument("--variant", default="default")
     parser.add_argument("--metrics-dir", default=None)
     parser.add_argument("--figures-dir", default=None)
+    parser.add_argument("--reuse-last", action="store_true",
+                        help="If save_root/last.pt is a finished checkpoint of this configuration, skip training and only evaluate")
 
     parser.add_argument("--meta-lr", type=float, default=1e-3)
     parser.add_argument("--meta-loss", default="weighted_nll", choices=["weighted_nll", "weighted_nll_pairwise", "mse"])
@@ -168,6 +182,18 @@ def parse_args():
     parser.add_argument("--min-agree-weight", type=float, default=1e-4, help="Minimum BCE weight after cosine decay")
     parser.add_argument("--dp-proj-damping", type=float, default=1e-2, help="Damping epsilon for dp_head null-space projection")
     parser.add_argument("--spatial-d-head", type=int, default=128, help="Attention head dimension for spatial_head")
+    # --- Deep-supervision proposals (docs/medical_deep_supervision_method_proposals.md) ---
+    parser.add_argument("--aux-detach", action="store_true",
+                        help="dualaug*/verify_*: detach the features entering the auxiliary branch (no auxiliary gradient into the backbone)")
+    parser.add_argument("--dualaug-target", default="agreement", choices=["agreement", "correctness", "correct_agree"],
+                        help="dualaug head target (dualaug_correctness always uses correct_agree)")
+    parser.add_argument("--verify-loss", default="binary", choices=["binary", "softmax"],
+                        help="verify_*: balanced binary candidate verification, or the auxiliary softmax-CE control")
+    parser.add_argument("--verify-weight", type=float, default=0.1, help="verify_*: auxiliary coefficient after warm-up (0 during warm-up)")
+    parser.add_argument("--verify-embed-dim", type=int, default=16, help="verify_global: class-embedding dimension")
+    parser.add_argument("--verify-hidden-dim", type=int, default=128, help="verify_global: verifier MLP hidden width")
+    parser.add_argument("--verify-pool", default="topk", choices=["topk", "gap"], help="verify_spatial: top-k pooling or the GAP control")
+    parser.add_argument("--verify-topk-fraction", type=float, default=0.2, help="verify_spatial: k = ceil(fraction * H * W)")
     return parser.parse_args()
 
 
@@ -278,6 +304,48 @@ def write_results(path: Path, rows):
         writer.writerows(rows)
 
 
+def atomic_torch_save(obj, path: Path):
+    tmp = path.with_name(path.name + ".tmp")
+    torch.save(obj, tmp)
+    os.replace(tmp, path)
+
+
+def load_last_checkpoint(model, path: Path, args, device) -> bool:
+    """Load a finished last.pt from an identical configuration so an interrupted evaluation can be redone."""
+    if not path.is_file():
+        return False
+    try:
+        checkpoint = torch.load(path, map_location=device, weights_only=False)
+    except Exception as exc:  # truncated or unreadable checkpoint: retrain
+        print(f"Cannot reuse {path} ({exc}); training from scratch.")
+        return False
+    saved = checkpoint.get("args", {})
+    keys = ("dataset", "method", "arch", "variant", "seed", "epochs")
+    mismatched = [key for key in keys if saved.get(key) != getattr(args, key)]
+    if checkpoint.get("checkpoint_type") != "last" or mismatched:
+        print(f"Cannot reuse {path} (mismatched {mismatched or 'checkpoint type'}); training from scratch.")
+        return False
+    model.load_state_dict(checkpoint["model"])
+    print(f"Reusing {path}: evaluation only.")
+    return True
+
+
+def write_aux_grad_log(model, save_root: Path):
+    rows = getattr(model, "aux_grad_log", None)
+    if rows:
+        write_dict_csv(save_root / "aux_grad_norms.csv", rows)
+
+
+def write_completion_marker(save_root: Path, args, reused: bool):
+    marker = save_root / COMPLETE_MARKER
+    tmp = marker.with_name(marker.name + ".tmp")
+    tmp.write_text(
+        json.dumps({"finished": datetime.now().isoformat(timespec="seconds"), "evaluation_only": reused, "args": vars(args)}, indent=2),
+        encoding="utf-8",
+    )
+    os.replace(tmp, marker)
+
+
 def _dataset_targets(dataset):
     if hasattr(dataset, "targets"):
         targets = getattr(dataset, "targets")
@@ -347,7 +415,10 @@ def write_rich_evaluation(args, save_root: Path, checkpoint_name: str, logits: t
         "seed": args.seed,
         "checkpoint": checkpoint_name,
     }
-    write_summary_csv(metrics_root / "summary.csv", summary, extra)
+    # Same-checkpoint softmax response separates classifier changes from confidence-readout changes.
+    msp = summarize_selective_metrics(logits, targets, torch.softmax(logits.float(), dim=1).max(dim=1).values)
+    msp_fields = {"msp_aurc": msp.aurc, "msp_eaurc": msp.eaurc, "msp_naurc": msp.naurc, "msp_auroc": msp.auroc}
+    write_summary_csv(metrics_root / "summary.csv", summary, {**extra, **msp_fields})
     write_dict_csv(metrics_root / "risk_coverage.csv", coverage_rows(curve, extra))
     roc_rows = roc_curve_points(per_sample["confidence"], per_sample["correct"])
     write_dict_csv(metrics_root / "roc_curve.csv", [{**row, **extra} for row in roc_rows])
@@ -459,10 +530,16 @@ def main():
         return
 
     model = build_method(args, num_classes=num_classes, input_size=spec.input_size, train_size=len(loaders["train"].dataset)).to(device)
-    if args.method in {"scsf", "dualaug"}:
+    if args.method in {"scsf", "dualaug", "dualaug_correctness"}:
         backbone_params = [p for name, p in model.named_parameters() if not name.startswith("calibrator.")]
         optimizer = optim.SGD(backbone_params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
         meta_optimizer = optim.Adam(model.calibrator.parameters(), lr=args.meta_lr)
+    elif args.method in {"verify_global", "verify_spatial"}:
+        head_prefixes = type(model).head_prefixes
+        backbone_params = [p for name, p in model.named_parameters() if not name.startswith(head_prefixes)]
+        head_params = [p for name, p in model.named_parameters() if name.startswith(head_prefixes)]
+        optimizer = optim.SGD(backbone_params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
+        meta_optimizer = optim.Adam(head_params, lr=args.meta_lr)
     elif args.method in {"ds_scsf", "ds_scsf_v2"}:
         meta_prefixes = ("calibrators.", "beta_logits", "fusion.")
         backbone_params = [p for name, p in model.named_parameters() if not name.startswith(meta_prefixes)]
@@ -530,11 +607,22 @@ def main():
             f"T={args.ccl_temperature} queue={args.ccl_queue_size} "
             f"momentum_encoder={args.ccl_momentum} variant={args.ccl_variant}"
         )
-    if args.method == "dualaug":
+    if args.method in {"dualaug", "dualaug_correctness"}:
         print(
-            "dualaug hparams: "
+            f"{args.method} hparams: "
             f"pretrain={args.pretrain} feature_spec={args.scsf_feature_spec} hidden_dim={args.hidden_dim} "
-            f"lambda={args.meta_weight_mode}({args.init_meta_weight}->{args.min_meta_weight}) meta_lr={args.meta_lr}"
+            f"lambda={args.meta_weight_mode}({args.init_meta_weight}->{args.min_meta_weight}) meta_lr={args.meta_lr} "
+            f"target={model.target} aux_detach={args.aux_detach}"
+        )
+    if args.method in {"verify_global", "verify_spatial"}:
+        shape = (
+            f"embed={args.verify_embed_dim} hidden={args.verify_hidden_dim}"
+            if args.method == "verify_global"
+            else f"pool={args.verify_pool} topk_fraction={args.verify_topk_fraction}"
+        )
+        print(
+            f"{args.method} hparams: pretrain={args.pretrain} loss={args.verify_loss} weight={args.verify_weight} "
+            f"{shape} meta_lr={args.meta_lr} aux_detach={args.aux_detach}"
         )
     if args.method == "dg":
         print(f"DG hparams: pretrain={args.pretrain} reward={args.reward}")
@@ -551,7 +639,10 @@ def main():
     best_aurc = float("inf")
     save_root = save_root_for(args)
     save_root.mkdir(parents=True, exist_ok=True)
-    for epoch in range(1, args.epochs + 1):
+    for stale in (COMPLETE_MARKER, LEGACY_LAST_OUTPUT):
+        (save_root / stale).unlink(missing_ok=True)
+    reused = args.reuse_last and load_last_checkpoint(model, save_root / "last.pt", args, device)
+    for epoch in range(1, 0 if reused else args.epochs + 1):
         freeze_scsf_backbone_if_needed(model, epoch, args)
         train_loss, train_acc = train_one_epoch(model, loaders["train"], optimizer, meta_optimizer, scaler, device, epoch, args)
         scheduler.step()
@@ -597,17 +688,19 @@ def main():
                 f"loss={train_loss:.4f} train_acc={train_acc:.2f} val=skipped"
             )
 
-    torch.save(
-        {
-            "model": model.state_dict(),
-            "args": vars(args),
-            "num_classes": num_classes,
-            "epoch": args.epochs,
-            "best_val_aurc": best_aurc,
-            "checkpoint_type": "last",
-        },
-        save_root / "last.pt",
-    )
+    if not reused:
+        atomic_torch_save(
+            {
+                "model": model.state_dict(),
+                "args": vars(args),
+                "num_classes": num_classes,
+                "epoch": args.epochs,
+                "best_val_aurc": best_aurc,
+                "checkpoint_type": "last",
+            },
+            save_root / "last.pt",
+        )
+        write_aux_grad_log(model, save_root)
     logits, targets, confidence = collect_outputs(model, loaders["test_full"], device)
     test_summary, test_curve = write_rich_evaluation(args, save_root, "last", logits, targets, confidence)
     write_fusion_diagnostics(args, model, loaders["test_full"], device, metrics_root_for(args, "last", save_root), "last")
@@ -621,6 +714,7 @@ def main():
         f"FPR@95TPR={test_summary.fpr_at_95_tpr:.5f}"
     )
     print(f"Coverage error: {format_curve(test_curve)}")
+    write_completion_marker(save_root, args, reused)
 
 
 if __name__ == "__main__":

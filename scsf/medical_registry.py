@@ -21,7 +21,8 @@ from PIL import Image, UnidentifiedImageError
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 # Bump when the cache layout or split logic changes so stale caches are rebuilt.
-CACHE_FORMAT_VERSION = 2
+# 3: annotation masks are no longer discovered as class images (Breast Ultrasound).
+CACHE_FORMAT_VERSION = 3
 SPLIT_ALIASES = {
     "train": "train",
     "training": "train",
@@ -40,6 +41,8 @@ SKIP_PARTS = {
     "segmentations",
     "mask images",
 }
+# Segmentation masks stored next to their images, e.g. BUSI "benign (1)_mask.png", "benign (4)_mask_1.png".
+MASK_STEM_PATTERN = re.compile(r"[_\- ]mask(?:[_\- ]?\d+)?$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -156,11 +159,20 @@ def _download_kaggle_dataset(entry: MedicalDatasetEntry, raw_root: Path):
     subprocess.run([*kaggle_cmd, "datasets", "download", "-d", entry.kaggle_slug, "-p", str(raw_root), "--unzip"], check=True)
 
 
+def _is_annotation_file(path: Path) -> bool:
+    return MASK_STEM_PATTERN.search(path.stem) is not None
+
+
+def _manifest_has_annotations(manifest_path: Path) -> bool:
+    with manifest_path.open(newline="", encoding="utf-8") as handle:
+        return any(_is_annotation_file(Path(row["source_path"])) for row in csv.DictReader(handle))
+
+
 def _iter_images(root: Path) -> Iterable[Path]:
     for path in sorted(root.rglob("*")):
         if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS:
             lowered_parts = {part.lower() for part in path.parts}
-            if lowered_parts.intersection(SKIP_PARTS):
+            if lowered_parts.intersection(SKIP_PARTS) or _is_annotation_file(path):
                 continue
             yield path
 
@@ -402,8 +414,13 @@ def prepare_medical_imagefolder(
         shutil.rmtree(cache_root)
 
     if cache_root.exists() and stats_path.exists():
-        cached_version = json.loads(stats_path.read_text(encoding="utf-8")).get("cache_format_version", 1)
-        if cached_version != CACHE_FORMAT_VERSION:
+        metadata = json.loads(stats_path.read_text(encoding="utf-8"))
+        cached_version = metadata.get("cache_format_version", 1)
+        if cached_version == 2 and manifest_path.exists() and not _manifest_has_annotations(manifest_path):
+            # Format 3 only changed annotation discovery; a mask-free v2 cache is already identical.
+            metadata["cache_format_version"] = CACHE_FORMAT_VERSION
+            stats_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        elif cached_version != CACHE_FORMAT_VERSION:
             print(f"Rebuilding {cache_root}: cache format {cached_version} -> {CACHE_FORMAT_VERSION}")
             shutil.rmtree(cache_root)
 

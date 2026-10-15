@@ -5,6 +5,7 @@ import argparse
 import csv
 from datetime import datetime
 import json
+import math
 from pathlib import Path
 import platform
 import shutil
@@ -12,6 +13,7 @@ import subprocess
 import sys
 
 from scsf.medical_registry import parse_datasets_to_run
+from scsf.run_status import complete_runs, is_complete
 
 
 DEFAULT_METHODS = ["sr", "ccl_sc", "sat", "dg", "selectivenet", "scsf", "dualaug"]
@@ -84,6 +86,17 @@ def parse_args():
     parser.add_argument("--ccl-temperature", type=float, default=0.1)
     parser.add_argument("--ccl-queue-size", type=int, default=300)
     parser.add_argument("--ccl-momentum", type=float, default=0.999)
+    # --- Deep-supervision proposals; each listed value becomes its own variant directory ---
+    parser.add_argument("--aux-feature-modes", nargs="+", default=["active"], choices=["active", "detached"],
+                        help="dualaug*/verify_*: active deep supervision and/or the matched detached-feature control")
+    parser.add_argument("--dualaug-targets", nargs="+", default=["agreement"], choices=["agreement", "correctness", "correct_agree"],
+                        help="Head targets for method dualaug (dualaug_correctness always uses correct_agree)")
+    parser.add_argument("--verify-losses", nargs="+", default=["binary"], choices=["binary", "softmax"])
+    parser.add_argument("--verify-pools", nargs="+", default=["topk"], choices=["topk", "gap"])
+    parser.add_argument("--verify-weight", type=float, default=0.1)
+    parser.add_argument("--verify-embed-dim", type=int, default=16)
+    parser.add_argument("--verify-hidden-dim", type=int, default=128)
+    parser.add_argument("--verify-topk-fraction", type=float, default=0.2)
     return parser.parse_args()
 
 
@@ -104,9 +117,32 @@ def scsf_variant(args) -> str:
     )
 
 
+def _git_output(*git_args: str) -> str:
+    try:
+        return subprocess.check_output(["git", *git_args], text=True, stderr=subprocess.STDOUT)
+    except (subprocess.SubprocessError, OSError) as exc:
+        return f"git {' '.join(git_args)} failed: {exc}\n"
+
+
 def write_run_config(args, run_root: Path, entries):
-    config_dir = run_root / "config"
+    """Record this invocation under config/invocations/<timestamp>/ and append it to config/invocations.jsonl.
+
+    Daily invocations share one run, so per-invocation records are kept instead of overwriting a single copy.
+    """
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    config_dir = run_root / "config" / "invocations" / stamp
     config_dir.mkdir(parents=True, exist_ok=True)
+    commit = _git_output("rev-parse", "HEAD").strip()
+    with (run_root / "config" / "invocations.jsonl").open("a", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "invocation": stamp,
+            "argv": sys.argv,
+            "git_commit": commit,
+            "methods": args.methods,
+            "datasets": [entry.slug for entry in entries],
+            "seeds": args.seeds,
+        }) + "\n")
+    (config_dir / "git_commit.txt").write_text(commit + "\n", encoding="utf-8")
     shutil.copy2(args.datasets_file, config_dir / "datasets_to_run.md")
     with (config_dir / "resolved_datasets.csv").open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["display_name", "slug", "kaggle_slug", "url"])
@@ -123,11 +159,7 @@ def write_run_config(args, run_root: Path, entries):
         + "\n",
         encoding="utf-8",
     )
-    try:
-        status = subprocess.check_output(["git", "status", "--short"], text=True)
-    except subprocess.SubprocessError as exc:
-        status = f"git status failed: {exc}\n"
-    (config_dir / "git_status.txt").write_text(status, encoding="utf-8")
+    (config_dir / "git_status.txt").write_text(_git_output("status", "--short"), encoding="utf-8")
     (config_dir / "args.json").write_text(json.dumps(vars(args), indent=2), encoding="utf-8")
 
 
@@ -148,15 +180,45 @@ def log_skip(message: str, commands_file: Path):
         f.write(f"# {message}\n")
 
 
-def method_variants(args, method: str) -> list[str]:
+def _detach_flags(mode: str) -> list[str]:
+    return ["--aux-detach"] if mode == "detached" else []
+
+
+def method_variants(args, method: str) -> list[tuple[str, list[str]]]:
+    """(variant directory, variant-specific run_experiment flags) for every configuration of `method`."""
     if method == "scsf":
-        return [scsf_variant(args)]
+        return [(scsf_variant(args), [])]
     if method == "ccl_sc":
-        return [f"ccl-{name}" for name in args.ccl_variants]
-    return ["default"]
+        return [(f"ccl-{name}", ["--ccl-variant", name]) for name in args.ccl_variants]
+    if method == "dualaug":
+        variants = []
+        for target in args.dualaug_targets:
+            for mode in args.aux_feature_modes:
+                # The original configuration keeps the "default" directory of the finished thesis runs.
+                name = "default" if (target, mode) == ("agreement", "active") else f"target-{target}__{mode}"
+                variants.append((name, ["--dualaug-target", target, *_detach_flags(mode)]))
+        return variants
+    if method == "dualaug_correctness":
+        return [(mode, _detach_flags(mode)) for mode in args.aux_feature_modes]
+    if method == "verify_global":
+        return [
+            (f"{loss}__{mode}", ["--verify-loss", loss, *_detach_flags(mode)])
+            for loss in args.verify_losses
+            for mode in args.aux_feature_modes
+        ]
+    if method == "verify_spatial":
+        return [
+            (f"{pool}-{loss}__{mode}", ["--verify-pool", pool, "--verify-loss", loss, *_detach_flags(mode)])
+            for pool in args.verify_pools
+            for loss in args.verify_losses
+            for mode in args.aux_feature_modes
+        ]
+    return [("default", [])]
 
 
-def train_command(args, run_root: Path, dataset: str, method: str, variant: str, seed: int) -> tuple[list[str], Path]:
+def train_command(
+    args, run_root: Path, dataset: str, method: str, variant: str, variant_flags: list[str], seed: int
+) -> tuple[list[str], Path]:
     cmd = [
         sys.executable,
         "run_experiment.py",
@@ -227,15 +289,23 @@ def train_command(args, run_root: Path, dataset: str, method: str, variant: str,
             "--meta-lr", str(args.meta_lr),
             "--pretrain", str(args.pretrain),
         ])
+    cmd.extend(variant_flags)
     if method == "ccl_sc":
         cmd.extend([
-            "--ccl-variant", variant.removeprefix("ccl-"),
             "--ccl-weight", str(args.ccl_weight),
             "--ccl-temperature", str(args.ccl_temperature),
             "--ccl-queue-size", str(args.ccl_queue_size),
             "--ccl-momentum", str(args.ccl_momentum),
         ])
-    if method == "dualaug":
+    if method in {"verify_global", "verify_spatial"}:
+        cmd.extend([
+            "--verify-weight", str(args.verify_weight),
+            "--verify-embed-dim", str(args.verify_embed_dim),
+            "--verify-hidden-dim", str(args.verify_hidden_dim),
+            "--verify-topk-fraction", str(args.verify_topk_fraction),
+            "--meta-lr", str(args.meta_lr),
+        ])
+    if method in {"dualaug", "dualaug_correctness"}:
         cmd.extend([
             "--scsf-feature-spec", args.scsf_feature_spec,
             "--hidden-dim", str(args.hidden_dim),
@@ -274,6 +344,8 @@ def train_command(args, run_root: Path, dataset: str, method: str, variant: str,
 
 
 def mean_std(values: list[float]) -> tuple[float, float]:
+    if not values:
+        return float("nan"), float("nan")
     mean = sum(values) / len(values)
     if len(values) < 2:
         return mean, float("nan")
@@ -291,18 +363,21 @@ def to_float(value):
 def aggregate_tables(run_root: Path):
     """Per-seed results plus mean/std (ddof=1) across training seeds, all on the full test set.
 
-    Covers every finished run under run_root, so tables accumulate across partial (daily) invocations.
+    Covers every complete run under run_root, so tables accumulate across partial (daily) invocations.
+    Undefined metrics (NaN, e.g. AUROC without errors) are left out of mean/std; when that happens the
+    number of valid seeds is reported in <metric>_n_valid.
     """
     metrics_root = run_root / "metrics"
     tables_dir = run_root / "tables"
     tables_dir.mkdir(parents=True, exist_ok=True)
 
+    finished = list(complete_runs(run_root))
     seed_rows = []
-    for summary_path in sorted(metrics_root.glob("*/*/*/*/seed_*/last/summary.csv")):
-        dataset, arch, method, variant, seed_dir = summary_path.relative_to(metrics_root).parts[:5]
+    for dataset, arch, method, variant, seed in finished:
+        summary_path = metrics_root / dataset / arch / method / variant / f"seed_{seed}" / "last" / "summary.csv"
         with summary_path.open(newline="") as f:
             row = next(csv.DictReader(f))
-        row.update({"dataset": dataset, "arch": arch, "method": method, "variant": variant, "seed": seed_dir.removeprefix("seed_")})
+        row.update({"dataset": dataset, "arch": arch, "method": method, "variant": variant, "seed": seed})
         seed_rows.append(row)
     if not seed_rows:
         return
@@ -327,7 +402,10 @@ def aggregate_tables(run_root: Path):
             values = [to_float(r.get(metric)) for r in rows]
             if any(v is None for v in values):
                 continue
-            out[f"{metric}_mean"], out[f"{metric}_std"] = mean_std(values)
+            valid = [v for v in values if not math.isnan(v)]
+            out[f"{metric}_mean"], out[f"{metric}_std"] = mean_std(valid)
+            if len(valid) < len(values):
+                out[f"{metric}_n_valid"] = len(valid)
         summary_rows.append(out)
     with (tables_dir / "main_results_mean_std.csv").open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=union_fieldnames(summary_rows))
@@ -335,8 +413,8 @@ def aggregate_tables(run_root: Path):
         writer.writerows(summary_rows)
 
     rc_groups: dict[tuple, dict[str, list[float]]] = {}
-    for curve_path in sorted(metrics_root.glob("*/*/*/*/seed_*/last/risk_coverage.csv")):
-        dataset, arch, method, variant, seed_dir = curve_path.relative_to(metrics_root).parts[:5]
+    for dataset, arch, method, variant, seed in finished:
+        curve_path = metrics_root / dataset / arch / method / variant / f"seed_{seed}" / "last" / "risk_coverage.csv"
         with curve_path.open(newline="") as f:
             for row in csv.DictReader(f):
                 bucket = rc_groups.setdefault((dataset, arch, method, variant, row["coverage"]), {"risk": [], "accuracy": []})
@@ -383,13 +461,15 @@ def main():
 
     for entry in entries:
         for method in args.methods:
-            for variant in method_variants(args, method):
+            for variant, variant_flags in method_variants(args, method):
                 for seed in args.seeds:
-                    cmd, checkpoint_dir = train_command(args, run_root, entry.slug, method, variant, seed)
-                    summary = run_root / "metrics" / entry.slug / args.arch / method / variant / f"seed_{seed}" / "last" / "summary.csv"
-                    if args.skip_existing and (checkpoint_dir / "last.pt").exists() and summary.exists():
-                        log_skip(f"SKIP existing {entry.slug}/{method}/{variant}/seed_{seed}", commands_file)
-                        continue
+                    cmd, _ = train_command(args, run_root, entry.slug, method, variant, variant_flags, seed)
+                    if args.skip_existing:
+                        if is_complete(run_root, entry.slug, args.arch, method, variant, seed):
+                            log_skip(f"SKIP complete {entry.slug}/{method}/{variant}/seed_{seed}", commands_file)
+                            continue
+                        # A finished last.pt of the same configuration is re-evaluated instead of retrained.
+                        cmd.append("--reuse-last")
                     run_command(cmd, commands_file, args.dry_run)
 
     if not args.dry_run:

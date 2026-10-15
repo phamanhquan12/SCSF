@@ -47,15 +47,20 @@ def risk_coverage_curve(
     targets_np = targets.detach().cpu()
     confidence_np = confidence.detach().cpu().float()
 
-    correct = logits_np.argmax(dim=1).eq(targets_np).numpy().astype(np.float32)
-    order = np.argsort(-confidence_np.numpy())
-    correct_sorted = correct[order]
-    n = len(correct_sorted)
+    correct = logits_np.argmax(dim=1).eq(targets_np).numpy().astype(np.float64)
+    return risk_coverage_from_correctness(confidence_np.numpy().astype(np.float64), correct, coverages)
+
+
+def risk_coverage_from_correctness(
+    confidence: np.ndarray, correct: np.ndarray, coverages: Iterable[float] = DEFAULT_COVERAGES
+) -> list[CoverageResult]:
+    expected_errors = expected_cumulative_errors(confidence, correct)
+    n = len(correct)
     results: list[CoverageResult] = []
 
     for coverage in coverages:
         selected = max(1, int(round((coverage / 100.0) * n)))
-        acc = float(correct_sorted[:selected].mean() * 100.0)
+        acc = float((1.0 - expected_errors[selected - 1] / selected) * 100.0)
         results.append(
             CoverageResult(
                 coverage=float(coverage),
@@ -94,12 +99,32 @@ def per_sample_predictions(logits: torch.Tensor, targets: torch.Tensor, confiden
     }
 
 
+def expected_cumulative_errors(confidence: np.ndarray, correctness: np.ndarray) -> np.ndarray:
+    """E[#errors among the k most confident samples], k = 1..N.
+
+    Samples with equal confidence are taken in uniformly random order, so the expectation spreads
+    each tied group's errors evenly over its positions and the result never depends on input order.
+    """
+    if confidence.size == 0:
+        return np.zeros(0, dtype=np.float64)
+    order = np.argsort(-confidence, kind="stable")
+    scores = confidence[order]
+    errors = 1.0 - correctness[order].astype(np.float64)
+    n = errors.size
+    group_starts = np.flatnonzero(np.r_[True, scores[1:] != scores[:-1]])
+    group_ends = np.r_[group_starts[1:], n]
+    group_errors = np.add.reduceat(errors, group_starts)
+    errors_before = np.r_[0.0, np.cumsum(group_errors)[:-1]]
+    group_id = np.repeat(np.arange(group_starts.size), group_ends - group_starts)
+    position_in_group = np.arange(1, n + 1) - group_starts[group_id]
+    group_sizes = (group_ends - group_starts)[group_id]
+    return errors_before[group_id] + position_in_group * group_errors[group_id] / group_sizes
+
+
 def exact_aurc(confidence: np.ndarray, correctness: np.ndarray) -> float:
     if confidence.size == 0:
         return 0.0
-    order = np.argsort(-confidence)
-    errors = 1.0 - correctness[order].astype(np.float64)
-    cumulative_risk = np.cumsum(errors) / np.arange(1, errors.size + 1)
+    cumulative_risk = expected_cumulative_errors(confidence, correctness) / np.arange(1, confidence.size + 1)
     return float(cumulative_risk.mean())
 
 
@@ -112,14 +137,19 @@ def oracle_aurc(correctness: np.ndarray) -> float:
     return float(cumulative_risk.mean())
 
 
-def naurc(confidence: np.ndarray, correctness: np.ndarray) -> float:
-    actual = exact_aurc(confidence, correctness)
-    optimal = oracle_aurc(correctness)
-    full_risk = float((1.0 - correctness.astype(np.float64)).mean())
+def _normalized_excess(actual: float, optimal: float, full_risk: float) -> float:
+    """(AURC - AURC*) / (R_full - AURC*); NaN when there are no errors or no correct predictions.
+
+    Not clipped above: values > 1 mean a ranking worse than ordering by chance."""
     denom = full_risk - optimal
     if denom <= 1e-12:
-        return 0.0
-    return float(np.clip((actual - optimal) / denom, 0.0, 1.0))
+        return float("nan")
+    return float(max(0.0, actual - optimal) / denom)
+
+
+def naurc(confidence: np.ndarray, correctness: np.ndarray) -> float:
+    full_risk = float((1.0 - correctness.astype(np.float64)).mean())
+    return _normalized_excess(exact_aurc(confidence, correctness), oracle_aurc(correctness), full_risk)
 
 
 def roc_curve_points(confidence: np.ndarray, correctness: np.ndarray) -> list[dict[str, float]]:
@@ -147,8 +177,9 @@ def roc_curve_points(confidence: np.ndarray, correctness: np.ndarray) -> list[di
 
 
 def auroc(confidence: np.ndarray, correctness: np.ndarray) -> float:
+    """Correct-vs-error AUROC; NaN (undefined) when the predictions are all correct or all wrong."""
     if np.unique(correctness).size < 2:
-        return 0.5
+        return float("nan")
     rows = roc_curve_points(confidence, correctness)
     fpr = np.asarray([row["fpr"] for row in rows], dtype=np.float64)
     tpr = np.asarray([row["tpr"] for row in rows], dtype=np.float64)
@@ -157,7 +188,7 @@ def auroc(confidence: np.ndarray, correctness: np.ndarray) -> float:
 
 def fpr_at_tpr(confidence: np.ndarray, correctness: np.ndarray, target_tpr: float = 0.95) -> float:
     if np.unique(correctness).size < 2:
-        return 1.0
+        return float("nan")
     for row in roc_curve_points(confidence, correctness):
         if row["tpr"] >= target_tpr:
             return float(row["fpr"])
@@ -166,19 +197,22 @@ def fpr_at_tpr(confidence: np.ndarray, correctness: np.ndarray, target_tpr: floa
 
 def summarize_selective_metrics(logits: torch.Tensor, targets: torch.Tensor, confidence: torch.Tensor) -> MetricSummary:
     per_sample = per_sample_predictions(logits, targets, confidence)
-    confidence_np = per_sample["confidence"].astype(np.float64)
-    correctness = per_sample["correct"].astype(np.float64)
+    return summary_from_correctness(per_sample["confidence"], per_sample["correct"])
+
+
+def summary_from_correctness(confidence: np.ndarray, correctness: np.ndarray) -> MetricSummary:
+    confidence_np = confidence.astype(np.float64)
+    correctness = correctness.astype(np.float64)
     actual_aurc = exact_aurc(confidence_np, correctness)
     best_aurc = oracle_aurc(correctness)
     full_risk = float((1.0 - correctness).mean())
-    denom = full_risk - best_aurc
     eaurc = max(0.0, actual_aurc - best_aurc)
     return MetricSummary(
         accuracy=float(correctness.mean() * 100.0),
         aurc=actual_aurc,
         oracle_aurc=best_aurc,
         eaurc=eaurc,
-        naurc=0.0 if denom <= 1e-12 else float(np.clip(eaurc / denom, 0.0, 1.0)),
+        naurc=_normalized_excess(actual_aurc, best_aurc, full_risk),
         auroc=auroc(confidence_np, correctness),
         fpr_at_95_tpr=fpr_at_tpr(confidence_np, correctness, 0.95),
         full_risk=full_risk,

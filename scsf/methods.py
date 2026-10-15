@@ -17,6 +17,9 @@ FAITHFULNESS_NOTES = {
     "sat": "SAT follows SAT-selective-cls/loss.py SelfAdativeTraining: momentum target history plus a reservation probability 1-p_y.",
     "selectivenet": "SelectiveNet follows selectivenet/models/*_vgg_selectivenet.py: class head, sigmoid selection head, auxiliary head, coverage penalty lambda=32.",
     "dualaug": "dualaug: train_fresh_sc.py dualaug on a torchvision backbone; VGG pool4/pool5 are replaced by pooled mid/late stages, the head gets the input LayerNorm of the SCSF calibrator, and there is no gradient clipping (no method in run_experiment.py clips).",
+    "dualaug_correctness": "dualaug_correctness: dualaug with head target a0*(0.5+0.5*a1), a_i = 1[view i correct] (proposal C); --aux-detach detaches the head's pooled features.",
+    "verify_global": "verify_global: proposal A; two-view CE + class-conditioned verifier MLP([GAP(layer3), e_c]) (embed 16, hidden 128), weight 0 in warm-up then --verify-weight; scored by u(x, argmax z).",
+    "verify_spatial": "verify_spatial: proposal B; two-view CE + Conv1x1(layer3) -> C evidence maps, top-20% spatial mean (or GAP control); scored by u(x, argmax z).",
     "ccl_sc": "CCL-SC: --ccl-variant official reproduces lamda-bbo/CCL-SC train_CCL_SC.py + moco/CSC.py (per-epoch key EMA, queues frozen once full, max-shifted loss); --ccl-variant paper uses the paper's CSC loss with MoCo-style per-step updates.",
 }
 
@@ -894,21 +897,71 @@ class DSSCSFv2Method(BackboneMethod):
         return loss + float(getattr(args, "ds_aux_cal_weight", 1.0)) * meta_weight * combined_meta
 
 
-class DualAugMethod(SCSFMethod):
-    """dualaug (port of train_fresh_sc.py --variant dualaug).
+class AuxGradLogMixin:
+    """Once per epoch after warm-up, record the auxiliary loss's gradient norm at ResNet layer2/3/4.
 
-    Loss = 0.5 * [CE(x) + CE(flip(x))] + lambda_t * BCE(head, 1[argmax f(x) == argmax f(flip(x))]).
-    The head is the SCSF calibrator on pooled mid+late features (gradient flows into the backbone)
-    and stop-gradient logits. lambda_t is 0 during warm-up, then cosine-decays init -> min meta weight.
-    Test inputs are scored by the raw head logit (single view, no flip).
+    The norms must be ~0 in the detached-feature controls; this checks the implementation, while the
+    active-vs-detached performance comparison establishes the contribution of deep supervision.
     """
 
-    def __init__(self, backbone: FeatureModel, num_classes: int, hidden_dim: int = 256, calibrator_arch: str = "standard"):
+    def on_epoch_start(self, epoch: int, args):
+        self._grad_log_pending = epoch > args.pretrain
+
+    def _maybe_log_aux_grad(self, aux_loss: torch.Tensor, epoch: int):
+        if not getattr(self, "_grad_log_pending", False) or not aux_loss.requires_grad:
+            return
+        self._grad_log_pending = False
+        blocks = {name: getattr(self.backbone, name) for name in ("layer2", "layer3", "layer4") if hasattr(self.backbone, name)}
+        if not blocks:
+            return
+        params = {name: [p for p in block.parameters() if p.requires_grad] for name, block in blocks.items()}
+        flat = [p for group in params.values() for p in group]
+        grads = torch.autograd.grad(aux_loss, flat, retain_graph=True, allow_unused=True)
+        row = {"epoch": epoch, "aux_loss": float(aux_loss.detach())}
+        offset = 0
+        for name, group in params.items():
+            squared = sum(float(g.float().pow(2).sum()) for g in grads[offset : offset + len(group)] if g is not None)
+            row[f"{name}_aux_grad_norm"] = squared ** 0.5
+            offset += len(group)
+        self.aux_grad_log.append(row)
+        print("aux grad norms: " + " ".join(f"{k}={v:.3e}" for k, v in row.items() if k.endswith("norm")))
+
+
+DUALAUG_TARGETS = ("agreement", "correctness", "correct_agree")
+
+
+class DualAugMethod(AuxGradLogMixin, SCSFMethod):
+    """dualaug (port of train_fresh_sc.py --variant dualaug).
+
+    Loss = 0.5 * [CE(x) + CE(flip(x))] + lambda_t * BCE(head, target).
+    The head is the SCSF calibrator on pooled mid+late features (gradient flows into the backbone unless
+    detach_features) and stop-gradient logits. lambda_t is 0 during warm-up, then cosine-decays
+    init -> min meta weight. Test inputs are scored by the raw head logit (single view, no flip).
+
+    target: agreement = 1[argmax f(x) == argmax f(Tx)] (original dualaug);
+            correctness = 1[argmax f(x) == y];
+            correct_agree = a0 * (0.5 + 0.5 * a1), a_i = 1[view i is correct] (dualaug_correctness).
+    """
+
+    def __init__(
+        self,
+        backbone: FeatureModel,
+        num_classes: int,
+        hidden_dim: int = 256,
+        calibrator_arch: str = "standard",
+        target: str = "agreement",
+        detach_features: bool = False,
+    ):
         super().__init__(backbone, num_classes, hidden_dim=hidden_dim, use_logits=True, scorer="meta", calibrator_arch=calibrator_arch)
+        if target not in DUALAUG_TARGETS:
+            raise ValueError(f"Unknown dualaug target '{target}'; choose from {DUALAUG_TARGETS}")
+        self.target = target
+        self.detach_features = detach_features
+        self.aux_grad_log: list[dict] = []
 
     def forward(self, x: torch.Tensor) -> MethodBatchOutput:
         logits, features = self._backbone_logits_features(x)
-        meta_logits = self.calibrator(features, logits)
+        meta_logits = self.calibrator(features.detach() if self.detach_features else features, logits)
         aux_outputs = None
         if self.training:
             aux_outputs = {"flip_logits": self.backbone(x.flip(-1))}
@@ -922,6 +975,15 @@ class DualAugMethod(SCSFMethod):
             aux_outputs=aux_outputs,
         )
 
+    def _head_target(self, logits: torch.Tensor, flip_logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        pred, flip_pred = logits.argmax(dim=1), flip_logits.argmax(dim=1)
+        if self.target == "agreement":
+            return pred.eq(flip_pred).float()
+        correct = pred.eq(targets).float()
+        if self.target == "correctness":
+            return correct
+        return correct * (0.5 + 0.5 * flip_pred.eq(targets).float())
+
     def training_loss(self, output, targets, indices, epoch, args):
         logits = output.train_logits
         flip_logits = output.aux_outputs["flip_logits"]
@@ -929,10 +991,149 @@ class DualAugMethod(SCSFMethod):
         if epoch <= args.pretrain:
             return ce
         with torch.no_grad():
-            agree = logits.argmax(dim=1).eq(flip_logits.argmax(dim=1)).float()
+            head_target = self._head_target(logits, flip_logits, targets)
         with torch.amp.autocast("cuda", enabled=False):
-            bce = F.binary_cross_entropy_with_logits(output.meta_logits.float(), agree)
+            bce = F.binary_cross_entropy_with_logits(output.meta_logits.float(), head_target)
+        self._maybe_log_aux_grad(bce, epoch)
         return ce + self._meta_weight(epoch, args) * bce
+
+
+class _ClassVerifierBase(AuxGradLogMixin, BackboneMethod):
+    """Two-view CE classifier plus a class-conditioned verifier on ResNet layer3 (Proposals A/B).
+
+    The verifier produces one raw logit u(x, c) per candidate class c. Training:
+        L = 0.5 [CE(z(x), y) + CE(z(Tx), y)] + alpha_t / 2 [L_ver(x, y) + L_ver(Tx, y)],
+    alpha_t = 0 during warm-up and verify_weight afterwards. Inference keeps argmax z(x) and scores
+    it with u(x, argmax z(x)) from a single backbone pass.
+
+    loss="binary": L_ver = 0.5 softplus(-u_y) + 1/(2(C-1)) sum_{c != y} softplus(u_c)
+    loss="softmax": L_ver = CE(u, y), scored by log softmax(u)[pred] (same order as the probability,
+                    without fp32 saturation ties); the auxiliary-classification control.
+    detach_features: the verifier reads layer3.detach() (no auxiliary gradient into the backbone).
+    """
+
+    head_prefixes: tuple[str, ...] = ()
+
+    def __init__(self, backbone: FeatureModel, num_classes: int, loss: str = "binary", detach_features: bool = False):
+        super().__init__(backbone, num_classes)
+        if not hasattr(backbone, "forward_with_maps") or not getattr(backbone, "_is_resnet", False):
+            raise ValueError("Class-conditioned verifiers need a ResNet backbone (layer3 feature map).")
+        if loss not in {"binary", "softmax"}:
+            raise ValueError(f"Unknown verifier loss '{loss}'")
+        if num_classes < 2:
+            raise ValueError("Class-conditioned verification needs at least two classes.")
+        self.loss = loss
+        self.detach_features = detach_features
+        self.aux_grad_log: list[dict] = []
+
+    def _candidate_logits(self, layer3: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+    def _verify(self, layer3: torch.Tensor) -> torch.Tensor:
+        layer3 = layer3.detach() if self.detach_features else layer3
+        if layer3.device.type == "cuda":
+            with torch.amp.autocast("cuda", enabled=False):
+                return self._candidate_logits(layer3.float())
+        return self._candidate_logits(layer3.float())
+
+    def forward(self, x: torch.Tensor) -> MethodBatchOutput:
+        logits, features, maps = self.backbone.forward_with_maps(x)
+        candidates = self._verify(maps["mid"])
+        scores = candidates if self.loss == "binary" else F.log_softmax(candidates, dim=1)
+        confidence = scores.gather(1, logits.argmax(dim=1, keepdim=True)).squeeze(1)
+        aux_outputs = {"candidates": candidates}
+        if self.training:
+            flip_logits, _, flip_maps = self.backbone.forward_with_maps(x.flip(-1))
+            aux_outputs.update({"flip_logits": flip_logits, "flip_candidates": self._verify(flip_maps["mid"])})
+        return MethodBatchOutput(logits, logits, confidence, logits.new_zeros(()), features=features, aux_outputs=aux_outputs)
+
+    def _verification_loss(self, candidates: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        if self.loss == "softmax":
+            return F.cross_entropy(candidates, targets)
+        positive = F.one_hot(targets, self.num_classes).bool()
+        pos_term = F.softplus(-candidates[positive])
+        neg_term = F.softplus(candidates).masked_fill(positive, 0.0).sum(dim=1) / (self.num_classes - 1)
+        return (0.5 * pos_term + 0.5 * neg_term).mean()
+
+    def training_loss(self, output, targets, indices, epoch, args):
+        flip_logits = output.aux_outputs["flip_logits"]
+        ce = 0.5 * (F.cross_entropy(output.train_logits, targets) + F.cross_entropy(flip_logits, targets))
+        if epoch <= args.pretrain:
+            return ce
+        with torch.amp.autocast("cuda", enabled=False):
+            verification = 0.5 * (
+                self._verification_loss(output.aux_outputs["candidates"], targets)
+                + self._verification_loss(output.aux_outputs["flip_candidates"], targets)
+            )
+        self._maybe_log_aux_grad(verification, epoch)
+        return ce + args.verify_weight * verification
+
+
+class VerifyGlobalMethod(_ClassVerifierBase):
+    """Proposal A: u(x, c) = MLP([GAP(layer3(x)), e_c]) with a learned class embedding e_c."""
+
+    head_prefixes = ("class_embed.", "verifier.")
+
+    def __init__(
+        self,
+        backbone: FeatureModel,
+        num_classes: int,
+        embed_dim: int = 16,
+        hidden_dim: int = 128,
+        loss: str = "binary",
+        detach_features: bool = False,
+    ):
+        super().__init__(backbone, num_classes, loss=loss, detach_features=detach_features)
+        self.class_embed = nn.Embedding(num_classes, embed_dim)
+        self.verifier = nn.Sequential(
+            nn.Linear(backbone.layer3_dim + embed_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def _candidate_logits(self, layer3: torch.Tensor) -> torch.Tensor:
+        pooled = F.adaptive_avg_pool2d(layer3, (1, 1)).flatten(1)
+        batch, classes = pooled.size(0), self.num_classes
+        pairs = torch.cat(
+            [
+                pooled.unsqueeze(1).expand(batch, classes, pooled.size(1)),
+                self.class_embed.weight.unsqueeze(0).expand(batch, classes, -1),
+            ],
+            dim=2,
+        )
+        return self.verifier(pairs).squeeze(2)
+
+
+class VerifySpatialMethod(_ClassVerifierBase):
+    """Proposal B: A = Conv1x1(layer3) in R^{C x H x W}; u(x, c) = mean of the top ceil(topk_fraction * HW)
+    values of A_c (pool="topk"), or the spatial mean of A_c (pool="gap", same parameters)."""
+
+    head_prefixes = ("evidence_conv.",)
+
+    def __init__(
+        self,
+        backbone: FeatureModel,
+        num_classes: int,
+        pool: str = "topk",
+        topk_fraction: float = 0.2,
+        loss: str = "binary",
+        detach_features: bool = False,
+    ):
+        super().__init__(backbone, num_classes, loss=loss, detach_features=detach_features)
+        if pool not in {"topk", "gap"}:
+            raise ValueError(f"Unknown verify_spatial pool '{pool}'")
+        if not 0.0 < topk_fraction <= 1.0:
+            raise ValueError("--verify-topk-fraction must be in (0, 1]")
+        self.pool = pool
+        self.topk_fraction = topk_fraction
+        self.evidence_conv = nn.Conv2d(backbone.layer3_dim, num_classes, kernel_size=1)
+
+    def _candidate_logits(self, layer3: torch.Tensor) -> torch.Tensor:
+        evidence = self.evidence_conv(layer3).flatten(2)
+        if self.pool == "gap":
+            return evidence.mean(dim=2)
+        k = max(1, math.ceil(self.topk_fraction * evidence.size(2)))
+        return evidence.topk(k, dim=2).values.mean(dim=2)
 
 
 class CCLSCMethod(BackboneMethod):
@@ -1440,7 +1641,7 @@ def build_method(args, num_classes: int, input_size: int, train_size: int) -> Ex
     model_classes = num_classes + 1 if method_name in {"dg", "sat"} else num_classes
     scsf_feature_spec = getattr(args, "scsf_feature_spec", "mid+late+logits")
     supports_scsf_feature_spec = args.arch in {"resnet18", "resnet50", "resnet101", "densenet121"}
-    uses_scsf_features = method_name in {"scsf", "ds_scsf", "ds_scsf_v2", "dualaug"} and supports_scsf_feature_spec
+    uses_scsf_features = method_name in {"scsf", "ds_scsf", "ds_scsf_v2", "dualaug", "dualaug_correctness"} and supports_scsf_feature_spec
     backbone = build_backbone(
         args.arch,
         model_classes,
@@ -1470,12 +1671,32 @@ def build_method(args, num_classes: int, input_size: int, train_size: int) -> Ex
             calibrator_arch=getattr(args, "calibrator_arch", "standard"),
             train_size=train_size,
         )
-    if method_name == "dualaug":
+    if method_name in {"dualaug", "dualaug_correctness"}:
         return DualAugMethod(
             backbone,
             num_classes,
             hidden_dim=args.hidden_dim,
             calibrator_arch=getattr(args, "calibrator_arch", "standard"),
+            target="correct_agree" if method_name == "dualaug_correctness" else getattr(args, "dualaug_target", "agreement"),
+            detach_features=getattr(args, "aux_detach", False),
+        )
+    if method_name == "verify_global":
+        return VerifyGlobalMethod(
+            backbone,
+            num_classes,
+            embed_dim=args.verify_embed_dim,
+            hidden_dim=args.verify_hidden_dim,
+            loss=args.verify_loss,
+            detach_features=args.aux_detach,
+        )
+    if method_name == "verify_spatial":
+        return VerifySpatialMethod(
+            backbone,
+            num_classes,
+            pool=args.verify_pool,
+            topk_fraction=args.verify_topk_fraction,
+            loss=args.verify_loss,
+            detach_features=args.aux_detach,
         )
     if method_name == "ds_scsf":
         parts = [part.strip() for part in scsf_feature_spec.split("+") if part.strip()]

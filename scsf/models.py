@@ -137,25 +137,35 @@ class TorchvisionFeatureModel(FeatureModel):
         features, _ = self._forward_features_and_classifier_input(x)
         return features
 
+    def _resnet_stage_maps(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        layer2 = self.layer2(self.layer1(self.stem(x)))
+        layer3 = self.layer3(layer2)
+        return {"early": layer2, "mid": layer3, "late": self.layer4(layer3)}
+
+    def forward_with_maps(self, x: torch.Tensor):
+        """(logits, features, stage maps) from one ResNet pass; maps keep their gradient path."""
+        if not self._is_resnet:
+            raise ValueError("forward_with_maps is implemented for ResNet backbones only.")
+        maps = self._resnet_stage_maps(x)
+        features, classifier_features = self._features_from_resnet_maps(maps)
+        return self.classifier(classifier_features), features, maps
+
+    def _features_from_resnet_maps(self, maps: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        final_features = nn.functional.adaptive_avg_pool2d(maps["late"], (1, 1)).flatten(1)
+        if not self._feature_layers:
+            if self.feature_spec == "logits":
+                return final_features.new_zeros(final_features.size(0), 0), final_features
+            return final_features, final_features
+        pooled = {
+            "early": nn.functional.adaptive_avg_pool2d(maps["early"], (1, 1)).flatten(1),
+            "mid": nn.functional.adaptive_avg_pool2d(maps["mid"], (1, 1)).flatten(1),
+            "late": final_features,
+        }
+        return torch.cat([pooled[layer] for layer in self._feature_layers], dim=1), final_features
+
     def _forward_features_and_classifier_input(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if self._is_resnet:
-            x = self.stem(x)
-            x = self.layer1(x)
-            x = self.layer2(x)
-            layer2 = x
-            layer3 = self.layer3(layer2)
-            layer4 = self.layer4(layer3)
-            final_features = nn.functional.adaptive_avg_pool2d(layer4, (1, 1)).flatten(1)
-            if not self._feature_layers:
-                if self.feature_spec == "logits":
-                    return final_features.new_zeros(final_features.size(0), 0), final_features
-                return final_features, final_features
-            pooled = {
-                "early": nn.functional.adaptive_avg_pool2d(layer2, (1, 1)).flatten(1),
-                "mid": nn.functional.adaptive_avg_pool2d(layer3, (1, 1)).flatten(1),
-                "late": final_features,
-            }
-            return torch.cat([pooled[layer] for layer in self._feature_layers], dim=1), final_features
+            return self._features_from_resnet_maps(self._resnet_stage_maps(x))
 
         if self._is_densenet:
             stage_maps = {}
