@@ -1,7 +1,7 @@
 # Deep Supervision for Medical Selective Classification: Method Proposals
 
 Date: 2026-10-15  
-Status: implemented on 2026-10-15 as `verify_global`, `verify_spatial` and `dualaug_correctness`, with the controls of Section 6. Not yet experimentally validated. Run with `DAY_PLAN=proposals bash run_medical_day.sh next`.
+Status: implemented on 2026-10-15 as `verify_global`, `verify_spatial` and `dualaug_correctness` (commit 698b9bf), then removed from the codebase on 2026-10-16 in favour of `docs/medical_deep_supervision_method_proposals (1).md` (`mg_scsf`, `mp_ds`, `se_ds`). Check out 698b9bf to reproduce them.
 
 ## 1. Objective and Constraints
 

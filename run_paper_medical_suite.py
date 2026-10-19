@@ -86,17 +86,6 @@ def parse_args():
     parser.add_argument("--ccl-temperature", type=float, default=0.1)
     parser.add_argument("--ccl-queue-size", type=int, default=300)
     parser.add_argument("--ccl-momentum", type=float, default=0.999)
-    # --- Deep-supervision proposals; each listed value becomes its own variant directory ---
-    parser.add_argument("--aux-feature-modes", nargs="+", default=["active"], choices=["active", "detached"],
-                        help="dualaug*/verify_*: active deep supervision and/or the matched detached-feature control")
-    parser.add_argument("--dualaug-targets", nargs="+", default=["agreement"], choices=["agreement", "correctness", "correct_agree"],
-                        help="Head targets for method dualaug (dualaug_correctness always uses correct_agree)")
-    parser.add_argument("--verify-losses", nargs="+", default=["binary"], choices=["binary", "softmax"])
-    parser.add_argument("--verify-pools", nargs="+", default=["topk"], choices=["topk", "gap"])
-    parser.add_argument("--verify-weight", type=float, default=0.1)
-    parser.add_argument("--verify-embed-dim", type=int, default=16)
-    parser.add_argument("--verify-hidden-dim", type=int, default=128)
-    parser.add_argument("--verify-topk-fraction", type=float, default=0.2)
     # --- Single-view deep supervision (mg_scsf, mp_ds, se_ds); each listed value becomes a variant directory ---
     parser.add_argument("--ds-detach-modes", nargs="+", default=["none"], choices=["none", "all", "new"],
                         help="none: full DS; all: All-DS-detached; new: detach only mg_scsf's margin branch "
@@ -113,6 +102,19 @@ def parse_args():
     parser.add_argument("--mp-dim", type=int, default=128)
     parser.add_argument("--mp-temperature", type=float, default=0.1)
     parser.add_argument("--se-topk-fraction", type=float, default=0.2)
+    # --- Round 2 DS (ro_ds, ag_ds, cm_ds) ---
+    parser.add_argument("--ds-primary-score", default="msp", choices=["msp", "aux"])
+    parser.add_argument("--ds-head-dim", type=int, default=128)
+    parser.add_argument("--ro-rank-weights", nargs="+", type=float, default=[0.5],
+                        help="ro_ds rank coefficients; include 0 for the ordinary-DS control")
+    parser.add_argument("--ro-rank-margin", type=float, default=0.2)
+    parser.add_argument("--ro-rank-temperature", type=float, default=0.1)
+    parser.add_argument("--ag-align-modes", nargs="+", default=["on"], choices=["on", "off"],
+                        help="ag_ds: projected/capped grads (on) or ordinary aux CE (off)")
+    parser.add_argument("--ag-align-rho", type=float, default=0.25)
+    parser.add_argument("--cm-complements", nargs="+", default=["targeted"], choices=["targeted", "off", "random"])
+    parser.add_argument("--cm-topk-fraction", type=float, default=0.1)
+    parser.add_argument("--cm-gate-prob", type=float, default=0.7)
     return parser.parse_args()
 
 
@@ -196,69 +198,65 @@ def log_skip(message: str, commands_file: Path):
         f.write(f"# {message}\n")
 
 
-def _detach_flags(mode: str) -> list[str]:
-    return ["--aux-detach"] if mode == "detached" else []
-
-
 def method_variants(args, method: str) -> list[tuple[str, list[str]]]:
     """(variant directory, variant-specific run_experiment flags) for every configuration of `method`."""
     if method == "scsf":
         return [(scsf_variant(args), [])]
     if method == "ccl_sc":
         return [(f"ccl-{name}", ["--ccl-variant", name]) for name in args.ccl_variants]
-    if method == "dualaug":
-        variants = []
-        for target in args.dualaug_targets:
-            for mode in args.aux_feature_modes:
-                # The original configuration keeps the "default" directory of the finished thesis runs.
-                name = "default" if (target, mode) == ("agreement", "active") else f"target-{target}__{mode}"
-                variants.append((name, ["--dualaug-target", target, *_detach_flags(mode)]))
-        return variants
-    if method == "dualaug_correctness":
-        return [(mode, _detach_flags(mode)) for mode in args.aux_feature_modes]
-    if method == "verify_global":
-        return [
-            (f"{loss}__{mode}", ["--verify-loss", loss, *_detach_flags(mode)])
-            for loss in args.verify_losses
-            for mode in args.aux_feature_modes
-        ]
-    if method == "verify_spatial":
-        return [
-            (f"{pool}-{loss}__{mode}", ["--verify-pool", pool, "--verify-loss", loss, *_detach_flags(mode)])
-            for pool in args.verify_pools
-            for loss in args.verify_losses
-            for mode in args.aux_feature_modes
-        ]
-    if method in {"mg_scsf", "mp_ds", "se_ds"}:
+    if method in {"mg_scsf", "mp_ds", "se_ds", "ro_ds", "ag_ds", "cm_ds"}:
         # Directory = branch site, head setting, coefficient/ramp and gradient mode.
         schedule = f"w{args.ds_aux_weight:g}r{args.ds_aux_ramp}"
         site_tags = {"layer3": "l3", "layer4": "l4", "layer3+layer4": "l34"}
         sites = ["layer3"] if method == "mg_scsf" else args.ds_sites
+        modes = [mode for mode in args.ds_detach_modes if mode != "new" or method == "mg_scsf"]
         if method == "mg_scsf":
             heads = [
                 (f"{loss}-m{args.mg_margin:g}" if loss == "hinge" else f"ce-s{args.mg_ce_scale:g}", ["--mg-loss", loss])
                 for loss in args.mg_losses
             ]
-            modes = args.ds_detach_modes
         elif method == "mp_ds":
             heads = [
                 (f"k{k}-d{args.mp_dim}-t{args.mp_temperature:g}", ["--mp-prototypes", str(k)])
                 for k in args.mp_prototypes
             ]
-            modes = [mode for mode in args.ds_detach_modes if mode != "new"]
-        else:
+        elif method == "se_ds":
             heads = [
                 (f"{pool}{args.se_topk_fraction:g}" if pool == "topk" else pool, ["--se-pool", pool])
                 for pool in args.se_pools
             ]
-            modes = [mode for mode in args.ds_detach_modes if mode != "new"]
+        elif method == "ro_ds":
+            heads = [
+                (f"rank{weight:g}-d{args.ds_head_dim}", ["--ro-rank-weight", str(weight)])
+                for weight in args.ro_rank_weights
+            ]
+        elif method == "ag_ds":
+            heads = [
+                (
+                    f"align{mode}-r{args.ag_align_rho:g}-d{args.ds_head_dim}",
+                    ["--ag-align" if mode == "on" else "--no-ag-align"],
+                )
+                for mode in args.ag_align_modes
+            ]
+        else:
+            heads = [
+                (f"comp-{comp}-k{args.cm_topk_fraction:g}-d{args.ds_head_dim}", ["--cm-complement", comp])
+                for comp in args.cm_complements
+            ]
+        primary_flags = (
+            ["--ds-primary-score", args.ds_primary_score]
+            if method in {"ro_ds", "ag_ds", "cm_ds"}
+            else []
+        )
         variants = []
         for site in sites:
             site_flags = [] if method == "mg_scsf" else ["--ds-site", site]
             for head, flags in heads:
                 for mode in modes:
                     name = f"{site_tags[site]}-{head}__{schedule}__detach-{mode}"
-                    variants.append((name, [*flags, *site_flags, "--ds-detach", mode]))
+                    if method in {"ro_ds", "ag_ds", "cm_ds"}:
+                        name = f"{name}__score-{args.ds_primary_score}"
+                    variants.append((name, [*flags, *site_flags, *primary_flags, "--ds-detach", mode]))
         return variants
     return [("default", [])]
 
@@ -344,22 +342,14 @@ def train_command(
             "--ccl-queue-size", str(args.ccl_queue_size),
             "--ccl-momentum", str(args.ccl_momentum),
         ])
-    if method in {"verify_global", "verify_spatial"}:
-        cmd.extend([
-            "--verify-weight", str(args.verify_weight),
-            "--verify-embed-dim", str(args.verify_embed_dim),
-            "--verify-hidden-dim", str(args.verify_hidden_dim),
-            "--verify-topk-fraction", str(args.verify_topk_fraction),
-            "--meta-lr", str(args.meta_lr),
-        ])
-    if method in {"dualaug", "dualaug_correctness"}:
+    if method == "dualaug":
         cmd.extend([
             "--scsf-feature-spec", args.scsf_feature_spec,
             "--hidden-dim", str(args.hidden_dim),
             "--meta-lr", str(args.meta_lr),
             "--min-meta-weight", str(args.min_meta_weight),
         ])
-    if method in {"mg_scsf", "mp_ds", "se_ds"}:
+    if method in {"mg_scsf", "mp_ds", "se_ds", "ro_ds", "ag_ds", "cm_ds"}:
         cmd.extend([
             "--ds-aux-weight", str(args.ds_aux_weight),
             "--ds-aux-ramp", str(args.ds_aux_ramp),
@@ -368,6 +358,12 @@ def train_command(
             "--mp-dim", str(args.mp_dim),
             "--mp-temperature", str(args.mp_temperature),
             "--se-topk-fraction", str(args.se_topk_fraction),
+            "--ds-head-dim", str(args.ds_head_dim),
+            "--ro-rank-margin", str(args.ro_rank_margin),
+            "--ro-rank-temperature", str(args.ro_rank_temperature),
+            "--ag-align-rho", str(args.ag_align_rho),
+            "--cm-topk-fraction", str(args.cm_topk_fraction),
+            "--cm-gate-prob", str(args.cm_gate_prob),
         ])
     if method == "dg" and args.dg_reward is not None:
         cmd.extend(["--reward", str(args.dg_reward)])

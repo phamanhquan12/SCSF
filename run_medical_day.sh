@@ -20,13 +20,6 @@
 #   thesis    day N = one baseline on every dataset in datasets_thesis.md x seeds 0 1 2
 #             (21 runs per day). dualaug does two forward passes per step, so its day
 #             takes roughly twice as long as the others.
-#   new       the three new methods only (verify_global, verify_spatial, dualaug_correctness),
-#             main configuration, 21 runs per day:
-#             DAY_PLAN=new bash run_medical_day.sh next --gpu 0
-#   proposals deep-supervision proposals (docs/medical_deep_supervision_method_proposals.md)
-#             with their matched controls; days 1-3 run active and detached features (42 runs).
-#             Use the same RUN_ID as the baselines so tables/ compares them directly:
-#             DAY_PLAN=proposals bash run_medical_day.sh next --gpu 0
 #   ds        single-view deep supervision (docs/medical_deep_supervision_method_proposals (1).md):
 #             mg_scsf, mp_ds, se_ds Full candidates, 21 runs per day. mp_ds/se_ds read layer3+layer4
 #             like SCSF (the default site); mg_scsf's margin branch reads layer3:
@@ -58,34 +51,6 @@ case "$DAY_PLAN" in
         PLAN_METHODS=(sr dualaug ccl_sc scsf sat dg selectivenet)
         PLAN_FLAGS=("" "" "" "" "" "" "")
         PLAN_VARIANTS=("" "" "" "" "" "" "")
-        ;;
-    new)
-        PLAN_METHODS=(verify_global verify_spatial dualaug_correctness)
-        PLAN_FLAGS=(
-            "--aux-feature-modes active --verify-losses binary"
-            "--aux-feature-modes active --verify-pools topk --verify-losses binary"
-            "--aux-feature-modes active"
-        )
-        PLAN_VARIANTS=("binary__active" "topk-binary__active" "active")
-        ;;
-    proposals)
-        PLAN_METHODS=(verify_global verify_spatial dualaug_correctness verify_global verify_spatial dualaug)
-        PLAN_FLAGS=(
-            "--aux-feature-modes active detached --verify-losses binary"
-            "--aux-feature-modes active detached --verify-pools topk --verify-losses binary"
-            "--aux-feature-modes active detached"
-            "--aux-feature-modes active --verify-losses softmax"
-            "--aux-feature-modes active --verify-pools gap --verify-losses binary"
-            "--aux-feature-modes active detached --dualaug-targets agreement correctness"
-        )
-        PLAN_VARIANTS=(
-            "binary__active binary__detached"
-            "topk-binary__active topk-binary__detached"
-            "active detached"
-            "softmax__active"
-            "gap-binary__active"
-            "default target-agreement__detached target-correctness__active target-correctness__detached"
-        )
         ;;
     ds)
         PLAN_METHODS=(mg_scsf mp_ds se_ds)
@@ -137,7 +102,7 @@ case "$DAY_PLAN" in
         )
         ;;
     *)
-        echo "Unknown DAY_PLAN '$DAY_PLAN' (use thesis, new, proposals, ds, ds_controls or ds_l3)" >&2
+        echo "Unknown DAY_PLAN '$DAY_PLAN' (use thesis, ds, ds_controls or ds_l3)" >&2
         exit 1
         ;;
 esac

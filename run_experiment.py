@@ -67,8 +67,8 @@ def parse_args():
         default="scsf",
         choices=[
             "scsf", "ds_scsf", "ds_scsf_v2", "sr", "dg", "sat", "selectivenet", "ccl_sc",
-            "residual_head", "dp_head", "spatial_head", "dualaug", "dualaug_correctness",
-            "verify_global", "verify_spatial", "mg_scsf", "mp_ds", "se_ds",
+            "residual_head", "dp_head", "spatial_head", "dualaug", "mg_scsf", "mp_ds", "se_ds",
+            "ro_ds", "ag_ds", "cm_ds",
         ],
     )
     parser.add_argument("--arch", default="vgg16_bn", choices=["vgg16_bn", "resnet18", "resnet50", "resnet101", "densenet121"])
@@ -183,18 +183,6 @@ def parse_args():
     parser.add_argument("--min-agree-weight", type=float, default=1e-4, help="Minimum BCE weight after cosine decay")
     parser.add_argument("--dp-proj-damping", type=float, default=1e-2, help="Damping epsilon for dp_head null-space projection")
     parser.add_argument("--spatial-d-head", type=int, default=128, help="Attention head dimension for spatial_head")
-    # --- Deep-supervision proposals (docs/medical_deep_supervision_method_proposals.md) ---
-    parser.add_argument("--aux-detach", action="store_true",
-                        help="dualaug*/verify_*: detach the features entering the auxiliary branch (no auxiliary gradient into the backbone)")
-    parser.add_argument("--dualaug-target", default="agreement", choices=["agreement", "correctness", "correct_agree"],
-                        help="dualaug head target (dualaug_correctness always uses correct_agree)")
-    parser.add_argument("--verify-loss", default="binary", choices=["binary", "softmax"],
-                        help="verify_*: balanced binary candidate verification, or the auxiliary softmax-CE control")
-    parser.add_argument("--verify-weight", type=float, default=0.1, help="verify_*: auxiliary coefficient after warm-up (0 during warm-up)")
-    parser.add_argument("--verify-embed-dim", type=int, default=16, help="verify_global: class-embedding dimension")
-    parser.add_argument("--verify-hidden-dim", type=int, default=128, help="verify_global: verifier MLP hidden width")
-    parser.add_argument("--verify-pool", default="topk", choices=["topk", "gap"], help="verify_spatial: top-k pooling or the GAP control")
-    parser.add_argument("--verify-topk-fraction", type=float, default=0.2, help="verify_spatial: k = ceil(fraction * H * W)")
     # --- Single-view deep supervision (docs/medical_deep_supervision_method_proposals (1).md) ---
     parser.add_argument("--ds-aux-weight", type=float, default=0.1,
                         help="mg_scsf/mp_ds/se_ds: auxiliary coefficient reached after the ramp")
@@ -204,7 +192,7 @@ def parse_args():
                         help="none: full DS; all: every auxiliary branch reads detached features; "
                              "new: detach only mg_scsf's margin branch (SCSF stays active)")
     parser.add_argument("--ds-site", default="layer3+layer4", choices=["layer3", "layer4", "layer3+layer4"],
-                        help="mp_ds/se_ds: backbone stages read by the auxiliary branch (layer3+layer4 mirrors SCSF's mid+late)")
+                        help="mp_ds/se_ds/ro_ds/ag_ds/cm_ds: backbone stages for the auxiliary branch (default layer3+layer4)")
     parser.add_argument("--mg-loss", default="hinge", choices=["hinge", "ce"],
                         help="mg_scsf: squared margin hinge, or the CE(scale * u, y) mechanism control")
     parser.add_argument("--mg-margin", type=float, default=0.2, help="mg_scsf: cosine margin of the hinge")
@@ -214,6 +202,20 @@ def parse_args():
     parser.add_argument("--mp-temperature", type=float, default=0.1, help="mp_ds: CE temperature")
     parser.add_argument("--se-pool", default="topk", choices=["topk", "gap"], help="se_ds: top-k pooling or the GAP control")
     parser.add_argument("--se-topk-fraction", type=float, default=0.2, help="se_ds: k = ceil(fraction * H * W)")
+    # --- Round 2 DS (docs/method_proposals.md): ro_ds / ag_ds / cm_ds ---
+    parser.add_argument("--ds-primary-score", default="msp", choices=["msp", "aux"],
+                        help="ro_ds/ag_ds/cm_ds: designated selective score (MSP by default); the other score is still logged")
+    parser.add_argument("--ds-head-dim", type=int, default=128, help="ro_ds/ag_ds/cm_ds: cosine-head hidden width")
+    parser.add_argument("--ro-rank-weight", type=float, default=0.5, help="ro_ds: coefficient of the pairwise correctness rank term (0 = ordinary DS control)")
+    parser.add_argument("--ro-rank-margin", type=float, default=0.2, help="ro_ds: rank-loss margin")
+    parser.add_argument("--ro-rank-temperature", type=float, default=0.1, help="ro_ds: softplus temperature")
+    parser.add_argument("--ag-align", action=argparse.BooleanOptionalAction, default=True,
+                        help="ag_ds: project/cap aux grads vs main CE (disable for ordinary DS control)")
+    parser.add_argument("--ag-align-rho", type=float, default=0.25, help="ag_ds: aux/main gradient-norm cap ratio")
+    parser.add_argument("--cm-complement", default="targeted", choices=["targeted", "off", "random"],
+                        help="cm_ds: targeted complement mask, full-pooling only, or random mask control")
+    parser.add_argument("--cm-topk-fraction", type=float, default=0.1, help="cm_ds: fraction of spatial locations erased")
+    parser.add_argument("--cm-gate-prob", type=float, default=0.7, help="cm_ds: min true-class probability to activate complement CE")
     return parser.parse_args()
 
 
@@ -249,6 +251,16 @@ def train_one_epoch(model, loader, optimizer, meta_optimizer, scaler, device, ep
         model.on_epoch_start(epoch, args)
     for batch in loader:
         inputs, targets, indices = unpack_batch(batch, device)
+        if hasattr(model, "train_batch"):
+            # AG-DS aligned updates own the optimizer step (gradient surgery).
+            loss_value, batch_acc = model.train_batch(
+                inputs, targets, indices, epoch, args, optimizer, scaler, use_amp
+            )
+            total_loss += loss_value * targets.size(0)
+            total_acc += batch_acc * targets.size(0)
+            total_seen += targets.size(0)
+            continue
+
         optimizer.zero_grad(set_to_none=True)
         if meta_optimizer is not None:
             meta_optimizer.zero_grad(set_to_none=True)
@@ -296,21 +308,29 @@ def collect_outputs(model, loader, device):
     logits_all = []
     targets_all = []
     confidence_all = []
+    aux_confidence_all = []
+    has_aux = False
     for batch in loader:
         inputs, targets, _ = unpack_batch(batch, device)
         output = model(inputs)
         logits_all.append(output.eval_logits.cpu())
         targets_all.append(targets.cpu())
         confidence_all.append(output.confidence.cpu())
+        aux = None
+        if output.aux_outputs and "aux_confidence" in output.aux_outputs:
+            aux = output.aux_outputs["aux_confidence"].cpu()
+            has_aux = True
+        aux_confidence_all.append(aux if aux is not None else output.confidence.new_full(output.confidence.shape, float("nan")).cpu())
     logits = torch.cat(logits_all)
     targets = torch.cat(targets_all)
     confidence = torch.cat(confidence_all)
-    return logits, targets, confidence
+    aux_confidence = torch.cat(aux_confidence_all) if has_aux else None
+    return logits, targets, confidence, aux_confidence
 
 
 @torch.no_grad()
 def evaluate(model, loader, device):
-    logits, targets, confidence = collect_outputs(model, loader, device)
+    logits, targets, confidence, _ = collect_outputs(model, loader, device)
     curve = risk_coverage_curve(logits, targets, confidence, DEFAULT_COVERAGES)
     summary = summarize_selective_metrics(logits, targets, confidence)
     return summary.accuracy, curve, summary
@@ -433,7 +453,15 @@ def metrics_root_for(args, checkpoint_name: str, save_root: Path) -> Path:
     return Path(args.metrics_dir) / args.dataset / args.method / args.arch / checkpoint_name
 
 
-def write_rich_evaluation(args, save_root: Path, checkpoint_name: str, logits: torch.Tensor, targets: torch.Tensor, confidence: torch.Tensor):
+def write_rich_evaluation(
+    args,
+    save_root: Path,
+    checkpoint_name: str,
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    confidence: torch.Tensor,
+    aux_confidence: torch.Tensor | None = None,
+):
     summary = summarize_selective_metrics(logits, targets, confidence)
     curve = risk_coverage_curve(logits, targets, confidence, DEFAULT_COVERAGES)
     per_sample = per_sample_predictions(logits, targets, confidence)
@@ -445,28 +473,35 @@ def write_rich_evaluation(args, save_root: Path, checkpoint_name: str, logits: t
         "variant": args.variant,
         "seed": args.seed,
         "checkpoint": checkpoint_name,
+        "primary_score": getattr(args, "ds_primary_score", "confidence"),
     }
     # Same-checkpoint softmax response separates classifier changes from confidence-readout changes.
     msp = summarize_selective_metrics(logits, targets, torch.softmax(logits.float(), dim=1).max(dim=1).values)
-    msp_fields = {"msp_aurc": msp.aurc, "msp_eaurc": msp.eaurc, "msp_naurc": msp.naurc, "msp_auroc": msp.auroc}
-    write_summary_csv(metrics_root / "summary.csv", summary, {**extra, **msp_fields})
+    side_fields = {"msp_aurc": msp.aurc, "msp_eaurc": msp.eaurc, "msp_naurc": msp.naurc, "msp_auroc": msp.auroc}
+    if aux_confidence is not None:
+        aux = summarize_selective_metrics(logits, targets, aux_confidence)
+        side_fields.update(
+            {"aux_aurc": aux.aurc, "aux_eaurc": aux.eaurc, "aux_naurc": aux.naurc, "aux_auroc": aux.auroc}
+        )
+    write_summary_csv(metrics_root / "summary.csv", summary, {**extra, **side_fields})
     write_dict_csv(metrics_root / "risk_coverage.csv", coverage_rows(curve, extra))
     roc_rows = roc_curve_points(per_sample["confidence"], per_sample["correct"])
     write_dict_csv(metrics_root / "roc_curve.csv", [{**row, **extra} for row in roc_rows])
     rows = []
     for idx in range(len(per_sample["target"])):
-        rows.append(
-            {
-                **extra,
-                "index": idx,
-                "target": int(per_sample["target"][idx]),
-                "prediction": int(per_sample["prediction"][idx]),
-                "confidence": float(per_sample["confidence"][idx]),
-                "correct": int(per_sample["correct"][idx]),
-                "loss": float(per_sample["loss"][idx]),
-                "softmax_response": float(per_sample["softmax_response"][idx]),
-            }
-        )
+        row = {
+            **extra,
+            "index": idx,
+            "target": int(per_sample["target"][idx]),
+            "prediction": int(per_sample["prediction"][idx]),
+            "confidence": float(per_sample["confidence"][idx]),
+            "correct": int(per_sample["correct"][idx]),
+            "loss": float(per_sample["loss"][idx]),
+            "softmax_response": float(per_sample["softmax_response"][idx]),
+        }
+        if aux_confidence is not None:
+            row["aux_confidence"] = float(aux_confidence[idx])
+        rows.append(row)
     write_dict_csv(metrics_root / "per_sample.csv", rows)
     if args.figures_dir is not None:
         write_plots(
@@ -561,18 +596,12 @@ def main():
         return
 
     model = build_method(args, num_classes=num_classes, input_size=spec.input_size, train_size=len(loaders["train"].dataset)).to(device)
-    if args.method in {"scsf", "dualaug", "dualaug_correctness", "mg_scsf"}:
+    if args.method in {"scsf", "dualaug", "mg_scsf"}:
         # mg_scsf's margin branch is outside "calibrator." and is trained by backbone SGD.
         backbone_params = [p for name, p in model.named_parameters() if not name.startswith("calibrator.")]
         optimizer = optim.SGD(backbone_params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
         meta_optimizer = optim.Adam(model.calibrator.parameters(), lr=args.meta_lr)
-    elif args.method in {"verify_global", "verify_spatial"}:
-        head_prefixes = type(model).head_prefixes
-        backbone_params = [p for name, p in model.named_parameters() if not name.startswith(head_prefixes)]
-        head_params = [p for name, p in model.named_parameters() if name.startswith(head_prefixes)]
-        optimizer = optim.SGD(backbone_params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
-        meta_optimizer = optim.Adam(head_params, lr=args.meta_lr)
-    elif args.method in {"mp_ds", "se_ds"}:
+    elif args.method in {"mp_ds", "se_ds", "ro_ds", "ag_ds", "cm_ds"}:
         # Backbone SGD settings for the new branch; it has no gradient during warm-up, so SGD leaves it
         # unstepped (including weight decay) until alpha_e > 0.
         optimizer = optim.SGD(list(model.parameters()), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
@@ -644,24 +673,13 @@ def main():
             f"T={args.ccl_temperature} queue={args.ccl_queue_size} "
             f"momentum_encoder={args.ccl_momentum} variant={args.ccl_variant}"
         )
-    if args.method in {"dualaug", "dualaug_correctness"}:
+    if args.method == "dualaug":
         print(
             f"{args.method} hparams: "
             f"pretrain={args.pretrain} feature_spec={args.scsf_feature_spec} hidden_dim={args.hidden_dim} "
-            f"lambda={args.meta_weight_mode}({args.init_meta_weight}->{args.min_meta_weight}) meta_lr={args.meta_lr} "
-            f"target={model.target} aux_detach={args.aux_detach}"
+            f"lambda={args.meta_weight_mode}({args.init_meta_weight}->{args.min_meta_weight}) meta_lr={args.meta_lr}"
         )
-    if args.method in {"verify_global", "verify_spatial"}:
-        shape = (
-            f"embed={args.verify_embed_dim} hidden={args.verify_hidden_dim}"
-            if args.method == "verify_global"
-            else f"pool={args.verify_pool} topk_fraction={args.verify_topk_fraction}"
-        )
-        print(
-            f"{args.method} hparams: pretrain={args.pretrain} loss={args.verify_loss} weight={args.verify_weight} "
-            f"{shape} meta_lr={args.meta_lr} aux_detach={args.aux_detach}"
-        )
-    if args.method in {"mg_scsf", "mp_ds", "se_ds"}:
+    if args.method in {"mg_scsf", "mp_ds", "se_ds", "ro_ds", "ag_ds", "cm_ds"}:
         if args.method == "mg_scsf":
             shape = (
                 f"loss={args.mg_loss} margin={args.mg_margin} ce_scale={args.mg_ce_scale} "
@@ -670,8 +688,23 @@ def main():
             )
         elif args.method == "mp_ds":
             shape = f"prototypes={args.mp_prototypes} dim={args.mp_dim} temperature={args.mp_temperature}"
-        else:
+        elif args.method == "se_ds":
             shape = f"pool={args.se_pool} topk_fraction={args.se_topk_fraction}"
+        elif args.method == "ro_ds":
+            shape = (
+                f"head_dim={args.ds_head_dim} rank_w={args.ro_rank_weight} "
+                f"rank_m={args.ro_rank_margin} rank_t={args.ro_rank_temperature} primary={args.ds_primary_score}"
+            )
+        elif args.method == "ag_ds":
+            shape = (
+                f"head_dim={args.ds_head_dim} align={args.ag_align} rho={args.ag_align_rho} "
+                f"primary={args.ds_primary_score}"
+            )
+        else:
+            shape = (
+                f"head_dim={args.ds_head_dim} complement={args.cm_complement} "
+                f"topk={args.cm_topk_fraction} gate={args.cm_gate_prob} primary={args.ds_primary_score}"
+            )
         new_params = sum(
             p.numel() for name, p in model.named_parameters() if not name.startswith(("backbone.", "calibrator."))
         )
@@ -762,11 +795,13 @@ def main():
             save_root / "last.pt",
         )
         write_aux_grad_log(model, save_root)
-    logits, targets, confidence = collect_outputs(model, loaders["test_full"], device)
-    test_summary, test_curve = write_rich_evaluation(args, save_root, "last", logits, targets, confidence)
+    logits, targets, confidence, aux_confidence = collect_outputs(model, loaders["test_full"], device)
+    test_summary, test_curve = write_rich_evaluation(
+        args, save_root, "last", logits, targets, confidence, aux_confidence
+    )
     write_fusion_diagnostics(args, model, loaders["test_full"], device, metrics_root_for(args, "last", save_root), "last")
-    val_logits, val_targets, val_confidence = collect_outputs(model, loaders["val"], device)
-    write_rich_evaluation(args, save_root, "val_last", val_logits, val_targets, val_confidence)
+    val_logits, val_targets, val_confidence, val_aux = collect_outputs(model, loaders["val"], device)
+    write_rich_evaluation(args, save_root, "val_last", val_logits, val_targets, val_confidence, val_aux)
     write_fusion_diagnostics(args, model, loaders["val"], device, metrics_root_for(args, "val_last", save_root), "val_last")
     write_results(save_root / "test_curve.csv", [r.__dict__ for r in test_curve])
     print(
