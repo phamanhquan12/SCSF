@@ -24,6 +24,8 @@ FAITHFULNESS_NOTES = {
     "ro_ds": "ro_ds: Round-2 risk-ordered DS; one pooled cosine head on --ds-site (default layer3+layer4), CE(10a,y)+rank of final correct vs wrong margins; MSP primary, aux margin also reported.",
     "ag_ds": "ag_ds: Round-2 aligned-gradient DS; same cosine head as ro_ds with CE only; projects/caps aux grads vs main CE on shared backbone params; MSP primary, aux margin also reported.",
     "cm_ds": "cm_ds: Round-2 complement-masked DS; pointwise cosine head on spatial --ds-site maps, full CE + gated complement CE; MSP primary, full-aux margin also reported.",
+    "pd_scsf": "pd_scsf: Round-3 prediction-depth SCSF; SCSF (TCP head, Adam, cosine lambda, raw-logit score) + training-only pooled cosine heads on --pd-depths (default layer2+layer3), CE(10a,y) with backbone gradient scaled by alpha_e; TCP target p_L(y)^(1-beta) * mean_d q_d(y)^beta.",
+    "ro_scsf": "ro_scsf: Round-3 risk-ordered SCSF; SCSF (TCP head, Adam, cosine lambda, raw-logit score) + ro_ds's training-only pooled cosine head on --ds-site (default layer3+layer4, the stages the SCSF calibrator reads), CE(10a,y)+rank of final correct vs wrong margins.",
     "ccl_sc": "CCL-SC: --ccl-variant official reproduces lamda-bbo/CCL-SC train_CCL_SC.py + moco/CSC.py (per-epoch key EMA, queues frozen once full, max-shifted loss); --ccl-variant paper uses the paper's CSC loss with MoCo-style per-step updates.",
 }
 
@@ -347,7 +349,7 @@ class SCSFMethod(BackboneMethod):
             if getattr(args, "scsf_meta_target", "tcp") == "correctness":
                 target_conf = correct
             else:
-                current_tcp = probs.gather(1, targets.unsqueeze(1)).squeeze(1)
+                current_tcp = self._current_tcp(output, targets, probs)
                 # Fix 1: EMA-smooth TCP targets when buffer is available and indices are known.
                 ema_momentum = float(getattr(args, "tcp_ema_momentum", 0.0))
                 if ema_momentum > 0.0 and self._tcp_ema is not None and indices is not None:
@@ -429,6 +431,10 @@ class SCSFMethod(BackboneMethod):
         if getattr(args, "scsf_meta_only_after_pretrain", False):
             return self._meta_weight(epoch, args) * meta_loss
         return ce + self._meta_weight(epoch, args) * meta_loss
+
+    def _current_tcp(self, output, targets: torch.Tensor, probs: torch.Tensor) -> torch.Tensor:
+        """Calibration target before EMA smoothing: the final classifier's true-class probability."""
+        return probs.gather(1, targets.unsqueeze(1)).squeeze(1)
 
     @staticmethod
     def _loss_confidence(output, args) -> torch.Tensor:
@@ -1779,6 +1785,288 @@ class CMDSMethod(DSDiagnosticsMixin, BackboneMethod):
         return row
 
 
+# --------------------------------------------------------------------------- #
+# Round 3: deep supervision aimed at the SCSF selective head (pd_scsf, ro_scsf)
+# --------------------------------------------------------------------------- #
+
+# Stages whose GAP feeds a pd_scsf depth head.
+PD_DEPTHS = {"layer2+layer3": ("early", "mid"), "layer3": ("mid",)}
+
+
+class _ScaleGrad(torch.autograd.Function):
+    """Identity forward; multiplies the backward gradient by `scale` (0 = detached)."""
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, scale: float) -> torch.Tensor:
+        ctx.scale = scale
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad: torch.Tensor):
+        return grad * ctx.scale, None
+
+
+def _ds_detach_check(detach: str, method: str):
+    if detach not in DS_DETACH_MODES:
+        raise ValueError(f"Unknown detach mode '{detach}' for {method}; choose from {DS_DETACH_MODES}")
+
+
+class PDSCSFMethod(DSDiagnosticsMixin, SCSFMethod):
+    """PD-SCSF: SCSF whose TCP target is distilled from training-only deep-supervision heads.
+
+    On training data the final classifier interpolates (p_L(y) -> 1 for almost every sample), so
+    SCSF's TCP target carries little ranking signal late in training. Shallower heads memorise less;
+    how early a sample becomes predictable (its prediction depth) tracks its difficulty. Each depth d
+    gets a pooled cosine head trained with CE(10 a_d, y), and the TCP target becomes
+        t = p_L(y)^(1 - beta) * qbar(y)^beta,  qbar(y) = mean_d softmax(10 a_d)_y  (stop-gradient).
+    The heads always learn at full rate; their gradient into the backbone is scaled by alpha_e, so the
+    warm-up backbone matches SCSF exactly while the heads are already fitted when the TCP loss starts.
+    target="final" keeps the heads and their backbone gradient but uses SCSF's p_L(y) target (control).
+    detach="new" stops only the heads' backbone gradient; "all" also detaches the calibrator features.
+    Inference uses the raw SCSF logit; the depth-averaged probability of the prediction is aux_confidence.
+    """
+
+    logit_scale = 10.0
+
+    def __init__(
+        self,
+        backbone: FeatureModel,
+        num_classes: int,
+        hidden_dim: int = 256,
+        use_logits: bool = True,
+        calibrator_arch: str = "standard",
+        train_size: int = 0,
+        depths: str = "layer2+layer3",
+        head_dim: int = 128,
+        beta: float = 0.5,
+        target: str = "depth",
+        detach: str = "none",
+        init_seed: int = 0,
+    ):
+        super().__init__(
+            backbone,
+            num_classes,
+            hidden_dim=hidden_dim,
+            use_logits=use_logits,
+            scorer="meta",
+            calibrator_arch=calibrator_arch,
+            train_size=train_size,
+        )
+        _require_resnet(backbone, "pd_scsf")
+        _ds_detach_check(detach, "pd_scsf")
+        if depths not in PD_DEPTHS:
+            raise ValueError(f"Unknown --pd-depths '{depths}'; choose from {tuple(PD_DEPTHS)}")
+        if target not in {"depth", "final"}:
+            raise ValueError(f"Unknown --pd-target '{target}'")
+        if not 0.0 <= beta <= 1.0:
+            raise ValueError(f"--pd-beta must be in [0, 1], got {beta}")
+        self.depth_stages = PD_DEPTHS[depths]
+        self.beta = beta
+        self.target = target
+        self.detach = detach
+        self.heads = nn.ModuleDict(
+            {
+                stage: PooledCosineDSHead(backbone._stage_dims[stage], head_dim, num_classes, init_seed + i)
+                for i, stage in enumerate(self.depth_stages)
+            }
+        )
+        self._depth_tcp: Optional[torch.Tensor] = None
+        self._init_ds_logs()
+
+    def _depth_logits(self, pooled: dict[str, torch.Tensor], grad_scale: float) -> list[torch.Tensor]:
+        with _fp32_region(next(iter(pooled.values())).device):
+            return [
+                self.logit_scale * self.heads[stage].similarities(_ScaleGrad.apply(pooled[stage].float(), grad_scale))
+                for stage in self.depth_stages
+            ]
+
+    def forward(self, x: torch.Tensor) -> MethodBatchOutput:
+        logits, features, maps = self.backbone.forward_with_maps(x)
+        meta_logits = self.calibrator(features.detach() if self.detach == "all" else features, logits)
+        pooled = {stage: F.adaptive_avg_pool2d(maps[stage], (1, 1)).flatten(1) for stage in self.depth_stages}
+        aux_outputs = {"pooled": pooled}
+        if not self.training:
+            pred = logits.argmax(dim=1, keepdim=True)
+            probs = [F.softmax(z, dim=1).gather(1, pred).squeeze(1) for z in self._depth_logits(pooled, 0.0)]
+            aux_outputs["aux_confidence"] = torch.stack(probs).mean(dim=0)
+        return MethodBatchOutput(
+            logits,
+            logits,
+            meta_logits.float(),
+            logits.new_zeros(()),
+            features=features,
+            meta_logits=meta_logits,
+            aux_outputs=aux_outputs,
+        )
+
+    def _current_tcp(self, output, targets, probs):
+        final = super()._current_tcp(output, targets, probs)
+        if self.target == "final":
+            return final
+        return final.clamp_min(1e-6).pow(1.0 - self.beta) * self._depth_tcp.clamp_min(1e-6).pow(self.beta)
+
+    def training_loss(self, output, targets, indices, epoch, args):
+        alpha = ds_aux_coefficient(epoch, args)
+        grad_scale = alpha if self.detach == "none" else 0.0
+        depth_logits = self._depth_logits(output.aux_outputs["pooled"], grad_scale)
+        with _fp32_region(targets.device):
+            depth_ce = torch.stack([F.cross_entropy(z, targets) for z in depth_logits]).mean()
+            with torch.no_grad():
+                depth_probs = [F.softmax(z, dim=1) for z in depth_logits]
+                self._depth_tcp = torch.stack(
+                    [p.gather(1, targets.unsqueeze(1)).squeeze(1) for p in depth_probs]
+                ).mean(dim=0)
+        total = SCSFMethod.training_loss(self, output, targets, indices, epoch, args)
+        if epoch > args.pretrain:
+            with torch.no_grad():
+                probs = F.softmax(output.train_logits.float(), dim=1)
+                final_tcp = SCSFMethod._current_tcp(self, output, targets, probs)
+                target_conf = self._current_tcp(output, targets, probs)
+                correct = output.train_logits.argmax(dim=1).eq(targets).float()
+            self._accumulate(
+                n=correct.new_tensor(float(correct.numel())),
+                n_correct=correct.sum(),
+                final_tcp=final_tcp.sum(),
+                depth_tcp=self._depth_tcp.sum(),
+                target=target_conf.sum(),
+                target_correct=(target_conf * correct).sum(),
+                target_wrong=(target_conf * (1.0 - correct)).sum(),
+                final_saturated=final_tcp.gt(0.99).float().sum(),
+                target_saturated=target_conf.gt(0.99).float().sum(),
+                **{
+                    f"{stage}_acc": p.argmax(dim=1).eq(targets).float().sum()
+                    for stage, p in zip(self.depth_stages, depth_probs)
+                },
+            )
+            ce = F.cross_entropy(output.train_logits, targets)
+            self._maybe_log_aux_grad({"ce": ce, "tcp": total - ce, "depth": depth_ce}, epoch)
+        # Head parameters get the full CE gradient; the backbone sees alpha_e times it (0 in warm-up).
+        return total + depth_ce
+
+    def _diagnostic_row(self, sums):
+        n, n_correct = sums["n"], sums["n_correct"]
+        row = {
+            "mean_final_tcp": self._ratio(sums["final_tcp"], n),
+            "mean_depth_tcp": self._ratio(sums["depth_tcp"], n),
+            "mean_target": self._ratio(sums["target"], n),
+            "mean_target_correct": self._ratio(sums["target_correct"], n_correct),
+            "mean_target_wrong": self._ratio(sums["target_wrong"], n - n_correct),
+            "final_saturated_frac": self._ratio(sums["final_saturated"], n),
+            "target_saturated_frac": self._ratio(sums["target_saturated"], n),
+        }
+        for stage in self.depth_stages:
+            row[f"{stage}_head_acc"] = self._ratio(sums[f"{stage}_acc"], n)
+        return row
+
+
+class ROSCSFMethod(DSDiagnosticsMixin, SCSFMethod):
+    """RO-SCSF: SCSF plus RO-DS's training-only risk-ordered head on the stages the calibrator reads.
+
+    In ro_ds the aux margin on GAP(layer3 || layer4) ranked errors better than the final MSP on most
+    datasets, but MSP cannot read that structure. SCSF's calibrator consumes GAP(layer3), GAP(layer4)
+    and the logits, so risk-ordered gradients at that site can reach the selective score:
+        L = SCSF + alpha_e [CE(10 a, y) + rank_weight * rank(margin_a(argmax z); final correct vs wrong)].
+    rank_weight=0 is ordinary DS on SCSF (control). detach="new" stops only the head's backbone
+    gradient; "all" also detaches the calibrator features. Inference uses the raw SCSF logit; the aux
+    margin of the final prediction is aux_confidence.
+    """
+
+    logit_scale = 10.0
+
+    def __init__(
+        self,
+        backbone: FeatureModel,
+        num_classes: int,
+        hidden_dim: int = 256,
+        use_logits: bool = True,
+        calibrator_arch: str = "standard",
+        train_size: int = 0,
+        site: str = "layer3+layer4",
+        head_dim: int = 128,
+        rank_weight: float = 0.5,
+        rank_margin: float = 0.2,
+        rank_temperature: float = 0.1,
+        detach: str = "none",
+        init_seed: int = 0,
+    ):
+        super().__init__(
+            backbone,
+            num_classes,
+            hidden_dim=hidden_dim,
+            use_logits=use_logits,
+            scorer="meta",
+            calibrator_arch=calibrator_arch,
+            train_size=train_size,
+        )
+        _require_resnet(backbone, "ro_scsf")
+        _ds_detach_check(detach, "ro_scsf")
+        if site not in DS_SITES:
+            raise ValueError(f"Unknown --ds-site '{site}'; choose from {tuple(DS_SITES)}")
+        self.site_stages = DS_SITES[site]
+        self.detach = detach
+        self.rank_weight = rank_weight
+        self.rank_margin = rank_margin
+        self.rank_temperature = rank_temperature
+        site_dim = sum(backbone._stage_dims[stage] for stage in self.site_stages)
+        self.head = PooledCosineDSHead(site_dim, head_dim, num_classes, init_seed)
+        self._init_ds_logs()
+
+    def forward(self, x: torch.Tensor) -> MethodBatchOutput:
+        logits, features, maps = self.backbone.forward_with_maps(x)
+        meta_logits = self.calibrator(features.detach() if self.detach == "all" else features, logits)
+        pooled = torch.cat(
+            [
+                F.adaptive_avg_pool2d(maps[stage].detach() if self.detach != "none" else maps[stage], (1, 1)).flatten(1)
+                for stage in self.site_stages
+            ],
+            dim=1,
+        )
+        with _fp32_region(pooled.device):
+            scores = self.head.similarities(pooled)
+        return MethodBatchOutput(
+            logits,
+            logits,
+            meta_logits.float(),
+            logits.new_zeros(()),
+            features=features,
+            meta_logits=meta_logits,
+            aux_outputs={"scores": scores, "aux_confidence": class_margin(scores, logits.argmax(dim=1))},
+        )
+
+    def training_loss(self, output, targets, indices, epoch, args):
+        total = SCSFMethod.training_loss(self, output, targets, indices, epoch, args)
+        alpha = ds_aux_coefficient(epoch, args)
+        if alpha <= 0.0:
+            return total
+        scores = output.aux_outputs["scores"]
+        with _fp32_region(scores.device):
+            aux_ce = F.cross_entropy(self.logit_scale * scores, targets)
+            with torch.no_grad():
+                pred = output.train_logits.argmax(dim=1)
+                correct = pred.eq(targets)
+            rank = pairwise_correctness_rank_loss(
+                class_margin(scores, pred), correct, margin=self.rank_margin, temperature=self.rank_temperature
+            )
+            aux = aux_ce + self.rank_weight * rank
+        self._accumulate_disagreement(scores, output.train_logits, targets)
+        self._accumulate(
+            n_batches=scores.new_ones(()),
+            n_valid_pair_batches=(rank.detach() > 0).float(),
+            n_errors=(~correct).float().sum(),
+            rank_loss=rank.detach(),
+        )
+        ce = F.cross_entropy(output.train_logits, targets)
+        self._maybe_log_aux_grad({"ce": ce, "tcp": total - ce, "aux": alpha * aux}, epoch)
+        return total + alpha * aux
+
+    def _diagnostic_row(self, sums):
+        row = self._disagreement_row(sums)
+        row["valid_pair_batch_frac"] = self._ratio(sums["n_valid_pair_batches"], sums["n_batches"])
+        row["mean_errors_per_batch"] = self._ratio(sums["n_errors"], sums["n_batches"])
+        row["mean_rank_loss"] = self._ratio(sums["rank_loss"], sums["n_batches"])
+        return row
+
+
 class CCLSCMethod(BackboneMethod):
     """CCL-SC (Wu et al., ICML 2024) with a momentum encoder and correct/error feature queues.
 
@@ -2284,7 +2572,7 @@ def build_method(args, num_classes: int, input_size: int, train_size: int) -> Ex
     model_classes = num_classes + 1 if method_name in {"dg", "sat"} else num_classes
     scsf_feature_spec = getattr(args, "scsf_feature_spec", "mid+late+logits")
     supports_scsf_feature_spec = args.arch in {"resnet18", "resnet50", "resnet101", "densenet121"}
-    uses_scsf_features = method_name in {"scsf", "ds_scsf", "ds_scsf_v2", "dualaug", "mg_scsf"} and supports_scsf_feature_spec
+    uses_scsf_features = method_name in {"scsf", "ds_scsf", "ds_scsf_v2", "dualaug", "mg_scsf", "pd_scsf", "ro_scsf"} and supports_scsf_feature_spec
     backbone = build_backbone(
         args.arch,
         model_classes,
@@ -2333,6 +2621,37 @@ def build_method(args, num_classes: int, input_size: int, train_size: int) -> Ex
             loss=args.mg_loss,
             margin=args.mg_margin,
             ce_scale=args.mg_ce_scale,
+            detach=args.ds_detach,
+            init_seed=ds_init_seed,
+        )
+    if method_name == "pd_scsf":
+        return PDSCSFMethod(
+            backbone,
+            num_classes,
+            hidden_dim=args.hidden_dim,
+            use_logits="logits" in scsf_feature_spec.split("+"),
+            calibrator_arch=getattr(args, "calibrator_arch", "standard"),
+            train_size=train_size,
+            depths=args.pd_depths,
+            head_dim=args.ds_head_dim,
+            beta=args.pd_beta,
+            target=args.pd_target,
+            detach=args.ds_detach,
+            init_seed=ds_init_seed,
+        )
+    if method_name == "ro_scsf":
+        return ROSCSFMethod(
+            backbone,
+            num_classes,
+            hidden_dim=args.hidden_dim,
+            use_logits="logits" in scsf_feature_spec.split("+"),
+            calibrator_arch=getattr(args, "calibrator_arch", "standard"),
+            train_size=train_size,
+            site=args.ds_site,
+            head_dim=args.ds_head_dim,
+            rank_weight=args.ro_rank_weight,
+            rank_margin=args.ro_rank_margin,
+            rank_temperature=args.ro_rank_temperature,
             detach=args.ds_detach,
             init_seed=ds_init_seed,
         )

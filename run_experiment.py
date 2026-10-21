@@ -68,7 +68,7 @@ def parse_args():
         choices=[
             "scsf", "ds_scsf", "ds_scsf_v2", "sr", "dg", "sat", "selectivenet", "ccl_sc",
             "residual_head", "dp_head", "spatial_head", "dualaug", "mg_scsf", "mp_ds", "se_ds",
-            "ro_ds", "ag_ds", "cm_ds",
+            "ro_ds", "ag_ds", "cm_ds", "pd_scsf", "ro_scsf",
         ],
     )
     parser.add_argument("--arch", default="vgg16_bn", choices=["vgg16_bn", "resnet18", "resnet50", "resnet101", "densenet121"])
@@ -216,6 +216,13 @@ def parse_args():
                         help="cm_ds: targeted complement mask, full-pooling only, or random mask control")
     parser.add_argument("--cm-topk-fraction", type=float, default=0.1, help="cm_ds: fraction of spatial locations erased")
     parser.add_argument("--cm-gate-prob", type=float, default=0.7, help="cm_ds: min true-class probability to activate complement CE")
+    # --- Round 3 DS for the SCSF head: pd_scsf / ro_scsf (ro_scsf reuses --ds-site, --ds-head-dim, --ro-rank-*) ---
+    parser.add_argument("--pd-depths", default="layer2+layer3", choices=["layer2+layer3", "layer3"],
+                        help="pd_scsf: stages that get a training-only depth head")
+    parser.add_argument("--pd-beta", type=float, default=0.5,
+                        help="pd_scsf: TCP target p_L(y)^(1-beta) * mean_d q_d(y)^beta (0 = SCSF target)")
+    parser.add_argument("--pd-target", default="depth", choices=["depth", "final"],
+                        help="pd_scsf: depth-distilled TCP target, or SCSF's p_L(y) with the same heads (control)")
     return parser.parse_args()
 
 
@@ -596,8 +603,8 @@ def main():
         return
 
     model = build_method(args, num_classes=num_classes, input_size=spec.input_size, train_size=len(loaders["train"].dataset)).to(device)
-    if args.method in {"scsf", "dualaug", "mg_scsf"}:
-        # mg_scsf's margin branch is outside "calibrator." and is trained by backbone SGD.
+    if args.method in {"scsf", "dualaug", "mg_scsf", "pd_scsf", "ro_scsf"}:
+        # The DS branches of mg_scsf/pd_scsf/ro_scsf are outside "calibrator." and are trained by backbone SGD.
         backbone_params = [p for name, p in model.named_parameters() if not name.startswith("calibrator.")]
         optimizer = optim.SGD(backbone_params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
         meta_optimizer = optim.Adam(model.calibrator.parameters(), lr=args.meta_lr)
@@ -679,8 +686,19 @@ def main():
             f"pretrain={args.pretrain} feature_spec={args.scsf_feature_spec} hidden_dim={args.hidden_dim} "
             f"lambda={args.meta_weight_mode}({args.init_meta_weight}->{args.min_meta_weight}) meta_lr={args.meta_lr}"
         )
-    if args.method in {"mg_scsf", "mp_ds", "se_ds", "ro_ds", "ag_ds", "cm_ds"}:
-        if args.method == "mg_scsf":
+    if args.method in {"mg_scsf", "mp_ds", "se_ds", "ro_ds", "ag_ds", "cm_ds", "pd_scsf", "ro_scsf"}:
+        scsf_shape = (
+            f"feature_spec={args.scsf_feature_spec} meta_target={args.scsf_meta_target} "
+            f"lambda={args.meta_weight_mode}({args.init_meta_weight}->{args.min_meta_weight}) meta_lr={args.meta_lr}"
+        )
+        if args.method == "pd_scsf":
+            shape = f"head_dim={args.ds_head_dim} target={args.pd_target} beta={args.pd_beta} {scsf_shape}"
+        elif args.method == "ro_scsf":
+            shape = (
+                f"head_dim={args.ds_head_dim} rank_w={args.ro_rank_weight} "
+                f"rank_m={args.ro_rank_margin} rank_t={args.ro_rank_temperature} {scsf_shape}"
+            )
+        elif args.method == "mg_scsf":
             shape = (
                 f"loss={args.mg_loss} margin={args.mg_margin} ce_scale={args.mg_ce_scale} "
                 f"feature_spec={args.scsf_feature_spec} meta_target={args.scsf_meta_target} "
@@ -708,7 +726,7 @@ def main():
         new_params = sum(
             p.numel() for name, p in model.named_parameters() if not name.startswith(("backbone.", "calibrator."))
         )
-        site = "layer3" if args.method == "mg_scsf" else args.ds_site
+        site = {"mg_scsf": "layer3", "pd_scsf": args.pd_depths}.get(args.method, args.ds_site)
         print(
             f"{args.method} hparams: pretrain={args.pretrain} site={site} alpha={args.ds_aux_weight} "
             f"ramp={args.ds_aux_ramp} detach={args.ds_detach} {shape} new_params={new_params}"

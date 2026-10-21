@@ -115,6 +115,11 @@ def parse_args():
     parser.add_argument("--cm-complements", nargs="+", default=["targeted"], choices=["targeted", "off", "random"])
     parser.add_argument("--cm-topk-fraction", type=float, default=0.1)
     parser.add_argument("--cm-gate-prob", type=float, default=0.7)
+    # --- Round 3 DS for the SCSF head (pd_scsf, ro_scsf); ro_scsf reuses --ds-sites/--ro-rank-weights ---
+    parser.add_argument("--pd-depths", nargs="+", default=["layer2+layer3"], choices=["layer2+layer3", "layer3"])
+    parser.add_argument("--pd-betas", nargs="+", type=float, default=[0.5])
+    parser.add_argument("--pd-targets", nargs="+", default=["depth"], choices=["depth", "final"],
+                        help="pd_scsf: depth-distilled TCP target, or the SCSF target with the same heads (control)")
     return parser.parse_args()
 
 
@@ -204,12 +209,12 @@ def method_variants(args, method: str) -> list[tuple[str, list[str]]]:
         return [(scsf_variant(args), [])]
     if method == "ccl_sc":
         return [(f"ccl-{name}", ["--ccl-variant", name]) for name in args.ccl_variants]
-    if method in {"mg_scsf", "mp_ds", "se_ds", "ro_ds", "ag_ds", "cm_ds"}:
+    if method in {"mg_scsf", "mp_ds", "se_ds", "ro_ds", "ag_ds", "cm_ds", "pd_scsf", "ro_scsf"}:
         # Directory = branch site, head setting, coefficient/ramp and gradient mode.
         schedule = f"w{args.ds_aux_weight:g}r{args.ds_aux_ramp}"
-        site_tags = {"layer3": "l3", "layer4": "l4", "layer3+layer4": "l34"}
-        sites = ["layer3"] if method == "mg_scsf" else args.ds_sites
-        modes = [mode for mode in args.ds_detach_modes if mode != "new" or method == "mg_scsf"]
+        site_tags = {"layer3": "l3", "layer4": "l4", "layer3+layer4": "l34", "layer2+layer3": "l23"}
+        sites = {"mg_scsf": ["layer3"], "pd_scsf": args.pd_depths}.get(method, args.ds_sites)
+        modes = [mode for mode in args.ds_detach_modes if mode != "new" or method in {"mg_scsf", "pd_scsf", "ro_scsf"}]
         if method == "mg_scsf":
             heads = [
                 (f"{loss}-m{args.mg_margin:g}" if loss == "hinge" else f"ce-s{args.mg_ce_scale:g}", ["--mg-loss", loss])
@@ -225,7 +230,13 @@ def method_variants(args, method: str) -> list[tuple[str, list[str]]]:
                 (f"{pool}{args.se_topk_fraction:g}" if pool == "topk" else pool, ["--se-pool", pool])
                 for pool in args.se_pools
             ]
-        elif method == "ro_ds":
+        elif method == "pd_scsf":
+            heads = [
+                (f"tgt{target}-b{beta:g}-d{args.ds_head_dim}", ["--pd-target", target, "--pd-beta", str(beta)])
+                for target in args.pd_targets
+                for beta in (args.pd_betas if target == "depth" else [0.0])
+            ]
+        elif method in {"ro_ds", "ro_scsf"}:
             heads = [
                 (f"rank{weight:g}-d{args.ds_head_dim}", ["--ro-rank-weight", str(weight)])
                 for weight in args.ro_rank_weights
@@ -250,7 +261,7 @@ def method_variants(args, method: str) -> list[tuple[str, list[str]]]:
         )
         variants = []
         for site in sites:
-            site_flags = [] if method == "mg_scsf" else ["--ds-site", site]
+            site_flags = {"mg_scsf": [], "pd_scsf": ["--pd-depths", site]}.get(method, ["--ds-site", site])
             for head, flags in heads:
                 for mode in modes:
                     name = f"{site_tags[site]}-{head}__{schedule}__detach-{mode}"
@@ -349,7 +360,7 @@ def train_command(
             "--meta-lr", str(args.meta_lr),
             "--min-meta-weight", str(args.min_meta_weight),
         ])
-    if method in {"mg_scsf", "mp_ds", "se_ds", "ro_ds", "ag_ds", "cm_ds"}:
+    if method in {"mg_scsf", "mp_ds", "se_ds", "ro_ds", "ag_ds", "cm_ds", "pd_scsf", "ro_scsf"}:
         cmd.extend([
             "--ds-aux-weight", str(args.ds_aux_weight),
             "--ds-aux-ramp", str(args.ds_aux_ramp),
@@ -369,8 +380,8 @@ def train_command(
         cmd.extend(["--reward", str(args.dg_reward)])
     if method == "selectivenet":
         cmd.extend(["--target-coverage", str(args.sn_target_coverage)])
-    if method in {"scsf", "mg_scsf"}:
-        # mg_scsf inherits the SCSF configuration of the matched baseline.
+    if method in {"scsf", "mg_scsf", "pd_scsf", "ro_scsf"}:
+        # SCSF-based DS methods inherit the SCSF configuration of the matched baseline.
         cmd.extend(
             [
                 "--scsf-feature-spec",
