@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
+import csv
 import math
+import os
 from typing import Optional
 
 import torch
@@ -25,6 +27,7 @@ FAITHFULNESS_NOTES = {
     "ag_ds": "ag_ds: Round-2 aligned-gradient DS; same cosine head as ro_ds with CE only; projects/caps aux grads vs main CE on shared backbone params; MSP primary, aux margin also reported.",
     "cm_ds": "cm_ds: Round-2 complement-masked DS; pointwise cosine head on spatial --ds-site maps, full CE + gated complement CE; MSP primary, full-aux margin also reported.",
     "pd_scsf": "pd_scsf: Round-3 prediction-depth SCSF; SCSF (TCP head, Adam, cosine lambda, raw-logit score) + training-only pooled cosine heads on --pd-depths (default layer2+layer3), CE(10a,y) with backbone gradient scaled by alpha_e; TCP target p_L(y)^(1-beta) * mean_d q_d(y)^beta.",
+    "ts_scsf": "ts_scsf: Round-3 control for pd_scsf without deep supervision; plain SCSF whose TCP target is p_L(y)^(1-beta) * softmax(z/T)_y^beta, T solved per batch so the mean target matches the matched pd_scsf run's logged mean target per epoch.",
     "ro_scsf": "ro_scsf: Round-3 risk-ordered SCSF; SCSF (TCP head, Adam, cosine lambda, raw-logit score) + ro_ds's training-only pooled cosine head on --ds-site (default layer3+layer4, the stages the SCSF calibrator reads), CE(10a,y)+rank of final correct vs wrong margins.",
     "ccl_sc": "CCL-SC: --ccl-variant official reproduces lamda-bbo/CCL-SC train_CCL_SC.py + moco/CSC.py (per-epoch key EMA, queues frozen once full, max-shifted loss); --ccl-variant paper uses the paper's CSC loss with MoCo-style per-step updates.",
 }
@@ -1959,6 +1962,112 @@ class PDSCSFMethod(DSDiagnosticsMixin, SCSFMethod):
         return row
 
 
+class TSSCSFMethod(DSDiagnosticsMixin, SCSFMethod):
+    """TS-SCSF: pd_scsf's no-deep-supervision control (Round 3).
+
+    Plain SCSF (no extra heads, no extra backbone gradient) whose TCP target is softened with the
+    final classifier's own temperature-scaled softmax instead of the depth heads:
+        t = p_L(y)^(1 - beta) * softmax(z / T)_y^beta.
+    T is solved per batch (bisection on log T) so the batch-mean target equals the mean target that
+    the matched pd_scsf run logged for the same epoch (its aux_diagnostics.csv). The control therefore
+    removes saturation by the same amount as pd_scsf; only which samples are marked hard differs.
+    """
+
+    def __init__(
+        self,
+        backbone: FeatureModel,
+        num_classes: int,
+        hidden_dim: int = 256,
+        use_logits: bool = True,
+        calibrator_arch: str = "standard",
+        train_size: int = 0,
+        beta: float = 0.5,
+        reference: str = "",
+    ):
+        super().__init__(
+            backbone,
+            num_classes,
+            hidden_dim=hidden_dim,
+            use_logits=use_logits,
+            scorer="meta",
+            calibrator_arch=calibrator_arch,
+            train_size=train_size,
+        )
+        if not 0.0 < beta <= 1.0:
+            raise ValueError(f"ts_scsf needs --pd-beta in (0, 1], got {beta}")
+        if not reference or not os.path.isfile(reference):
+            raise FileNotFoundError(f"ts_scsf needs the matched pd_scsf aux_diagnostics.csv (--ts-reference), got '{reference}'")
+        with open(reference, newline="", encoding="utf-8") as f:
+            self.reference = {int(row["epoch"]): float(row["mean_target"]) for row in csv.DictReader(f)}
+        self.beta = beta
+        self._epoch = 0
+        self._temperature: Optional[torch.Tensor] = None
+        self._init_ds_logs()
+
+    def _reference_target(self, epoch: int) -> float:
+        if epoch in self.reference:
+            return self.reference[epoch]
+        return self.reference[min(self.reference, key=lambda e: abs(e - epoch))]
+
+    def _current_tcp(self, output, targets, probs):
+        final = super()._current_tcp(output, targets, probs)
+        logits = output.train_logits.detach().float()
+        goal = self._reference_target(self._epoch)
+
+        def target_at(log_t: float) -> torch.Tensor:
+            soft = F.softmax(logits / math.exp(log_t), dim=1).gather(1, targets.unsqueeze(1)).squeeze(1)
+            return final.float().clamp_min(1e-6).pow(1.0 - self.beta) * soft.clamp_min(1e-6).pow(self.beta)
+
+        # The mean target falls monotonically as T grows; bisect log T in [log 0.25, log 1000].
+        lo, hi = math.log(0.25), math.log(1000.0)
+        for _ in range(30):
+            mid = 0.5 * (lo + hi)
+            if float(target_at(mid).mean()) > goal:
+                lo = mid
+            else:
+                hi = mid
+        log_t = 0.5 * (lo + hi)
+        self._temperature = final.new_tensor(math.exp(log_t))
+        return target_at(log_t).to(final.dtype)
+
+    def training_loss(self, output, targets, indices, epoch, args):
+        self._epoch = epoch
+        total = SCSFMethod.training_loss(self, output, targets, indices, epoch, args)
+        if epoch > args.pretrain:
+            with torch.no_grad():
+                probs = F.softmax(output.train_logits.float(), dim=1)
+                final_tcp = SCSFMethod._current_tcp(self, output, targets, probs)
+                target_conf = self._current_tcp(output, targets, probs)
+                correct = output.train_logits.argmax(dim=1).eq(targets).float()
+            self._accumulate(
+                n=correct.new_tensor(float(correct.numel())),
+                n_correct=correct.sum(),
+                batches=correct.new_tensor(1.0),
+                temperature=self._temperature.float(),
+                reference=correct.new_tensor(self._reference_target(epoch)),
+                final_tcp=final_tcp.sum(),
+                target=target_conf.sum(),
+                target_correct=(target_conf * correct).sum(),
+                target_wrong=(target_conf * (1.0 - correct)).sum(),
+                final_saturated=final_tcp.gt(0.99).float().sum(),
+                target_saturated=target_conf.gt(0.99).float().sum(),
+            )
+        return total
+
+    def _diagnostic_row(self, sums):
+        n, n_correct, batches = sums["n"], sums["n_correct"], sums["batches"]
+        return {
+            "mean_temperature": self._ratio(sums["temperature"], batches),
+            "reference_target": self._ratio(sums["reference"], batches),
+            "mean_final_tcp": self._ratio(sums["final_tcp"], n),
+            "mean_target": self._ratio(sums["target"], n),
+            "mean_target_correct": self._ratio(sums["target_correct"], n_correct),
+            "mean_target_wrong": self._ratio(sums["target_wrong"], n - n_correct),
+            "final_saturated_frac": self._ratio(sums["final_saturated"], n),
+            "target_saturated_frac": self._ratio(sums["target_saturated"], n),
+        }
+
+
 class ROSCSFMethod(DSDiagnosticsMixin, SCSFMethod):
     """RO-SCSF: SCSF plus RO-DS's training-only risk-ordered head on the stages the calibrator reads.
 
@@ -2572,7 +2681,7 @@ def build_method(args, num_classes: int, input_size: int, train_size: int) -> Ex
     model_classes = num_classes + 1 if method_name in {"dg", "sat"} else num_classes
     scsf_feature_spec = getattr(args, "scsf_feature_spec", "mid+late+logits")
     supports_scsf_feature_spec = args.arch in {"resnet18", "resnet50", "resnet101", "densenet121"}
-    uses_scsf_features = method_name in {"scsf", "ds_scsf", "ds_scsf_v2", "dualaug", "mg_scsf", "pd_scsf", "ro_scsf"} and supports_scsf_feature_spec
+    uses_scsf_features = method_name in {"scsf", "ds_scsf", "ds_scsf_v2", "dualaug", "mg_scsf", "pd_scsf", "ro_scsf", "ts_scsf"} and supports_scsf_feature_spec
     backbone = build_backbone(
         args.arch,
         model_classes,
@@ -2638,6 +2747,17 @@ def build_method(args, num_classes: int, input_size: int, train_size: int) -> Ex
             target=args.pd_target,
             detach=args.ds_detach,
             init_seed=ds_init_seed,
+        )
+    if method_name == "ts_scsf":
+        return TSSCSFMethod(
+            backbone,
+            num_classes,
+            hidden_dim=args.hidden_dim,
+            use_logits="logits" in scsf_feature_spec.split("+"),
+            calibrator_arch=getattr(args, "calibrator_arch", "standard"),
+            train_size=train_size,
+            beta=args.pd_beta,
+            reference=args.ts_reference,
         )
     if method_name == "ro_scsf":
         return ROSCSFMethod(

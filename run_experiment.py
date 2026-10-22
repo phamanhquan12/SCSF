@@ -68,7 +68,7 @@ def parse_args():
         choices=[
             "scsf", "ds_scsf", "ds_scsf_v2", "sr", "dg", "sat", "selectivenet", "ccl_sc",
             "residual_head", "dp_head", "spatial_head", "dualaug", "mg_scsf", "mp_ds", "se_ds",
-            "ro_ds", "ag_ds", "cm_ds", "pd_scsf", "ro_scsf",
+            "ro_ds", "ag_ds", "cm_ds", "pd_scsf", "ro_scsf", "ts_scsf",
         ],
     )
     parser.add_argument("--arch", default="vgg16_bn", choices=["vgg16_bn", "resnet18", "resnet50", "resnet101", "densenet121"])
@@ -223,6 +223,8 @@ def parse_args():
                         help="pd_scsf: TCP target p_L(y)^(1-beta) * mean_d q_d(y)^beta (0 = SCSF target)")
     parser.add_argument("--pd-target", default="depth", choices=["depth", "final"],
                         help="pd_scsf: depth-distilled TCP target, or SCSF's p_L(y) with the same heads (control)")
+    parser.add_argument("--ts-reference", default="",
+                        help="ts_scsf: aux_diagnostics.csv of the matched pd_scsf run (per-epoch mean target to match)")
     return parser.parse_args()
 
 
@@ -603,7 +605,7 @@ def main():
         return
 
     model = build_method(args, num_classes=num_classes, input_size=spec.input_size, train_size=len(loaders["train"].dataset)).to(device)
-    if args.method in {"scsf", "dualaug", "mg_scsf", "pd_scsf", "ro_scsf"}:
+    if args.method in {"scsf", "dualaug", "mg_scsf", "pd_scsf", "ro_scsf", "ts_scsf"}:
         # The DS branches of mg_scsf/pd_scsf/ro_scsf are outside "calibrator." and are trained by backbone SGD.
         backbone_params = [p for name, p in model.named_parameters() if not name.startswith("calibrator.")]
         optimizer = optim.SGD(backbone_params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
@@ -730,6 +732,12 @@ def main():
         print(
             f"{args.method} hparams: pretrain={args.pretrain} site={site} alpha={args.ds_aux_weight} "
             f"ramp={args.ds_aux_ramp} detach={args.ds_detach} {shape} new_params={new_params}"
+        )
+    if args.method == "ts_scsf":
+        print(
+            f"ts_scsf hparams: pretrain={args.pretrain} beta={args.pd_beta} reference={args.ts_reference} "
+            f"feature_spec={args.scsf_feature_spec} meta_target={args.scsf_meta_target} "
+            f"lambda={args.meta_weight_mode}({args.init_meta_weight}->{args.min_meta_weight}) meta_lr={args.meta_lr}"
         )
     if args.method == "dg":
         print(f"DG hparams: pretrain={args.pretrain} reward={args.reward}")

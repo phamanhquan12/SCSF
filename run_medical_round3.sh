@@ -21,11 +21,14 @@
 #
 # Plans (ROUND3_PLAN=full by default):
 #   full      Full candidates (2 days x 21 runs): pd_scsf, ro_scsf.
-#   controls  Mechanism controls (4 days):
+#   controls  Mechanism controls (5 days):
 #             1 pd_scsf target=final  (same heads + DS gradient, SCSF target)
-#             2 pd_scsf detach=new    (depth target, no DS gradient into the backbone)
-#             3 ro_scsf rank=0        (ordinary DS on SCSF)
-#             4 ro_scsf detach=new    (risk-ordered head, no DS gradient)
+#             2 ts_scsf               (no DS: SCSF target softened by temperature to
+#                                      pd_scsf's per-epoch mean target; needs day-1 full runs)
+#             3 pd_scsf detach=new    (depth target, no DS gradient into the backbone)
+#             4 ro_scsf rank=0        (ordinary DS on SCSF)
+#             5 ro_scsf detach=new    (risk-ordered head, no DS gradient)
+#   ablation  pd_scsf with the layer3 depth head only (drops layer2), 1 day.
 #   screen    First screen: COVID seed 0 only for the two Full candidates.
 #
 # ROUND3_DATASETS / ROUND3_SEEDS / RUN_ID / RESULTS_ROOT override paths.
@@ -59,18 +62,29 @@ case "$ROUND3_PLAN" in
         )
         ;;
     controls)
-        PLAN_METHODS=(pd_scsf pd_scsf ro_scsf ro_scsf)
+        PLAN_METHODS=(pd_scsf ts_scsf pd_scsf ro_scsf ro_scsf)
         PLAN_FLAGS=(
             "--pd-depths layer2+layer3 --pd-targets final --ds-detach-modes none"
+            "--pd-betas 0.5"
             "$PD_FULL --ds-detach-modes new"
             "--ds-sites layer3+layer4 --ro-rank-weights 0 --ds-detach-modes none"
             "$RO_FULL --ds-detach-modes new"
         )
         PLAN_VARIANTS=(
             "l23-tgtfinal-b0-d128__w0.1r5__detach-none"
+            "matched-l23-b0.5"
             "l23-tgtdepth-b0.5-d128__w0.1r5__detach-new"
             "l34-rank0-d128__w0.1r5__detach-none"
             "l34-rank0.5-d128__w0.1r5__detach-new"
+        )
+        ;;
+    ablation)
+        PLAN_METHODS=(pd_scsf)
+        PLAN_FLAGS=(
+            "--pd-depths layer3 --pd-betas 0.5 --pd-targets depth --ds-detach-modes none"
+        )
+        PLAN_VARIANTS=(
+            "l3-tgtdepth-b0.5-d128__w0.1r5__detach-none"
         )
         ;;
     screen)
@@ -87,7 +101,7 @@ case "$ROUND3_PLAN" in
         DATASETS=(covid_qu_ex)
         ;;
     *)
-        echo "Unknown ROUND3_PLAN '$ROUND3_PLAN' (use full, controls or screen)" >&2
+        echo "Unknown ROUND3_PLAN '$ROUND3_PLAN' (use full, controls, ablation or screen)" >&2
         exit 1
         ;;
 esac

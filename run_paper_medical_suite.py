@@ -120,6 +120,8 @@ def parse_args():
     parser.add_argument("--pd-betas", nargs="+", type=float, default=[0.5])
     parser.add_argument("--pd-targets", nargs="+", default=["depth"], choices=["depth", "final"],
                         help="pd_scsf: depth-distilled TCP target, or the SCSF target with the same heads (control)")
+    parser.add_argument("--ts-reference-variant", default="l23-tgtdepth-b0.5-d128__w0.1r5__detach-none",
+                        help="ts_scsf: pd_scsf variant (same run) whose per-epoch mean target is matched")
     return parser.parse_args()
 
 
@@ -207,6 +209,8 @@ def method_variants(args, method: str) -> list[tuple[str, list[str]]]:
     """(variant directory, variant-specific run_experiment flags) for every configuration of `method`."""
     if method == "scsf":
         return [(scsf_variant(args), [])]
+    if method == "ts_scsf":
+        return [(f"matched-{args.ts_reference_variant.split('-')[0]}-b{beta:g}", ["--pd-beta", str(beta)]) for beta in args.pd_betas]
     if method == "ccl_sc":
         return [(f"ccl-{name}", ["--ccl-variant", name]) for name in args.ccl_variants]
     if method in {"mg_scsf", "mp_ds", "se_ds", "ro_ds", "ag_ds", "cm_ds", "pd_scsf", "ro_scsf"}:
@@ -380,7 +384,10 @@ def train_command(
         cmd.extend(["--reward", str(args.dg_reward)])
     if method == "selectivenet":
         cmd.extend(["--target-coverage", str(args.sn_target_coverage)])
-    if method in {"scsf", "mg_scsf", "pd_scsf", "ro_scsf"}:
+    if method == "ts_scsf":
+        reference = run_root / "checkpoints" / dataset / args.arch / "pd_scsf" / args.ts_reference_variant / str(seed)
+        cmd.extend(["--ts-reference", str(reference / "aux_diagnostics.csv")])
+    if method in {"scsf", "mg_scsf", "pd_scsf", "ro_scsf", "ts_scsf"}:
         # SCSF-based DS methods inherit the SCSF configuration of the matched baseline.
         cmd.extend(
             [
