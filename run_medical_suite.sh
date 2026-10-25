@@ -143,6 +143,7 @@ while [[ $# -gt 0 ]]; do
         --epochs)         EPOCHS="$2"; shift 2 ;;
         --pretrain)       PRETRAIN="$2"; shift 2 ;;
         --batch-size)     BATCH_SIZE="$2"; shift 2 ;;
+        --arch)           ARCH="$2"; shift 2 ;;
         --workers)        WORKERS="$2"; shift 2 ;;
         --seeds)
             shift; SEEDS=()

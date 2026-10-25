@@ -78,7 +78,18 @@ KNOWN_MEDICAL_DATASETS: dict[str, tuple[str, str]] = {
     "retinaloct": ("retinal_oct", "paultimothymooney/kermany2018"),
     "ham10000": ("ham10000", "kmader/skin-cancer-mnist-ham10000"),
     "aptos2019": ("aptos2019", "mariaherrerot/aptos2019"),
+    "pcam": ("pcam", "andrewmvd/metastatic-tissue-classification-patchcamelyon"),
 }
+
+# PatchCamelyon ships as HDF5; only these files are downloaded (the 2.4 GB train-mask file is skipped).
+# The official train/valid/test split is kept; label 1 = metastatic tissue in the centre 32x32 region.
+PCAM_SPLIT_FILES = {
+    "train": ("pcam/training_split.h5", "Labels/Labels/camelyonpatch_level_2_split_train_y.h5"),
+    "valid": ("pcam/validation_split.h5", "Labels/Labels/camelyonpatch_level_2_split_valid_y.h5"),
+    "test": ("pcam/test_split.h5", "Labels/Labels/camelyonpatch_level_2_split_test_y.h5"),
+}
+PCAM_CLASSES = ("normal", "tumor")
+PCAM_EXPORT_MARKER = ".export_complete"
 
 
 def _normalize_name(name: str) -> str:
@@ -159,6 +170,75 @@ def _download_kaggle_dataset(entry: MedicalDatasetEntry, raw_root: Path):
     subprocess.run([*kaggle_cmd, "datasets", "download", "-d", entry.kaggle_slug, "-p", str(raw_root), "--unzip"], check=True)
 
 
+def _kaggle_command() -> list[str]:
+    kaggle_exe = shutil.which("kaggle")
+    venv_kaggle = Path(sys.executable).parent / "kaggle"
+    if kaggle_exe is None and venv_kaggle.exists():
+        kaggle_exe = str(venv_kaggle)
+    if kaggle_exe is None:
+        raise RuntimeError("PCam download requires the Kaggle CLI (`pip install kaggle`) and ~/.kaggle/kaggle.json.")
+    return [kaggle_exe]
+
+
+def _pcam_png_root(raw_root: Path) -> Path:
+    return raw_root / "png"
+
+
+def _prepare_pcam_raw(entry: MedicalDatasetEntry, raw_root: Path):
+    """Download the PCam HDF5 split files and export them as PNGs under raw/pcam/png/<split>/<class>/."""
+    import h5py
+    import numpy as np
+
+    h5_root = raw_root / "h5"
+    h5_root.mkdir(parents=True, exist_ok=True)
+    needed = [Path(rel).name for pair in PCAM_SPLIT_FILES.values() for rel in pair]
+    if not all((h5_root / name).exists() for name in needed):
+        # Kaggle's single-file download returns 404 for files in sub-folders, so fetch the whole dataset.
+        download_root = raw_root / "kaggle"
+        subprocess.run([*_kaggle_command(), "datasets", "download", "-d", entry.kaggle_slug, "-p", str(download_root), "--unzip"], check=True)
+        for name in needed:
+            found = sorted(download_root.rglob(name))
+            if not found:
+                raise RuntimeError(f"PCam download has no {name} under {download_root}")
+            shutil.move(str(found[0]), h5_root / name)
+        shutil.rmtree(download_root)  # drops the unused train-mask HDF5 and metadata
+
+    png_root = _pcam_png_root(raw_root)
+    for split, (images_file, labels_file) in PCAM_SPLIT_FILES.items():
+        with h5py.File(h5_root / Path(images_file).name, "r") as fx, h5py.File(h5_root / Path(labels_file).name, "r") as fy:
+            images, labels = fx["x"], np.asarray(fy["y"]).reshape(-1)
+            if len(images) != len(labels):
+                raise RuntimeError(f"PCam {split}: {len(images)} images but {len(labels)} labels")
+            for class_name in PCAM_CLASSES:
+                (png_root / split / class_name).mkdir(parents=True, exist_ok=True)
+            chunk = 4096
+            for start in range(0, len(images), chunk):
+                block = images[start : start + chunk]
+
+                def save(offset: int):
+                    index = start + offset
+                    dest = png_root / split / PCAM_CLASSES[int(labels[index])] / f"{split}_{index:06d}.png"
+                    Image.fromarray(block[offset]).save(dest, format="PNG")
+
+                with ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as pool:
+                    list(pool.map(save, range(len(block))))
+            print(f"PCam {split}: exported {len(images)} patches")
+    (png_root / PCAM_EXPORT_MARKER).write_text("ok\n", encoding="utf-8")
+
+
+def _discover_pcam_samples(raw_root: Path) -> list[dict]:
+    """Official PCam split, no content de-duplication (keeps the published split sizes)."""
+    png_root = _pcam_png_root(raw_root)
+    rows = []
+    for split_dir in ("train", "valid", "test"):
+        for class_name in PCAM_CLASSES:
+            for path in sorted((png_root / split_dir / class_name).glob("*.png")):
+                rows.append({"source_path": path, "split": SPLIT_ALIASES[split_dir], "class_name": class_name})
+    if not rows:
+        raise RuntimeError(f"No exported PCam patches under {png_root}")
+    return rows
+
+
 def _is_annotation_file(path: Path) -> bool:
     return MASK_STEM_PATTERN.search(path.stem) is not None
 
@@ -205,6 +285,8 @@ def _class_from_path(path: Path, raw_root: Path) -> tuple[str | None, str | None
 
 
 def _discover_samples(raw_root: Path) -> list[dict]:
+    if (_pcam_png_root(raw_root) / PCAM_EXPORT_MARKER).exists():
+        return _discover_pcam_samples(raw_root)
     if (raw_root / "HAM10000_metadata.csv").exists():
         return _discover_ham10000_samples(raw_root)
     aptos_rows = _discover_aptos2019_samples(raw_root)
@@ -403,7 +485,12 @@ def prepare_medical_imagefolder(
     manifest_path = cache_root / "split_manifest.csv"
     stats_path = cache_root / "preprocess_manifest.json"
 
-    if not raw_root.exists() or not any(_iter_images(raw_root)):
+    if entry.slug == "pcam":
+        if not (_pcam_png_root(raw_root) / PCAM_EXPORT_MARKER).exists():
+            if not download:
+                raise FileNotFoundError(f"PCam is not prepared under {raw_root}. Re-run with --download.")
+            _prepare_pcam_raw(entry, raw_root)
+    elif not raw_root.exists() or not any(_iter_images(raw_root)):
         if not download:
             raise FileNotFoundError(
                 f"{entry.display_name} is not prepared under {raw_root}. Re-run with --download or place the Kaggle files there."
