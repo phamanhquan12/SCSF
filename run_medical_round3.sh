@@ -29,6 +29,8 @@
 #             4 ro_scsf rank=0        (ordinary DS on SCSF)
 #             5 ro_scsf detach=new    (risk-ordered head, no DS gradient)
 #   ablation  pd_scsf with the layer3 depth head only (drops layer2), 1 day.
+#   detach_pd pd_scsf only with detach=new (depth TCP target; aux CE does not
+#             update the backbone — isolates DS representation effects), 1 day.
 #   screen    First screen: COVID seed 0 only for the two Full candidates.
 #
 # ROUND3_DATASETS / ROUND3_SEEDS / RUN_ID / RESULTS_ROOT override paths.
@@ -87,6 +89,18 @@ case "$ROUND3_PLAN" in
             "l3-tgtdepth-b0.5-d128__w0.1r5__detach-none"
         )
         ;;
+    detach_pd)
+        # Same recipe as full pd_scsf, but --ds-detach new: depth heads still
+        # train and still supply the TCP target; their CE gradient into the
+        # backbone is zeroed (isolates deep-supervision representation effects).
+        PLAN_METHODS=(pd_scsf)
+        PLAN_FLAGS=(
+            "$PD_FULL --ds-detach-modes new"
+        )
+        PLAN_VARIANTS=(
+            "l23-tgtdepth-b0.5-d128__w0.1r5__detach-new"
+        )
+        ;;
     screen)
         PLAN_METHODS=(pd_scsf ro_scsf)
         PLAN_FLAGS=(
@@ -101,7 +115,7 @@ case "$ROUND3_PLAN" in
         DATASETS=(covid_qu_ex)
         ;;
     *)
-        echo "Unknown ROUND3_PLAN '$ROUND3_PLAN' (use full, controls, ablation or screen)" >&2
+        echo "Unknown ROUND3_PLAN '$ROUND3_PLAN' (use full, controls, ablation, detach_pd or screen)" >&2
         exit 1
         ;;
 esac

@@ -190,7 +190,8 @@ def parse_args():
                         help="mg_scsf/mp_ds/se_ds: alpha_e = w * min(1, max(0, (e - pretrain) / ramp))")
     parser.add_argument("--ds-detach", default="none", choices=["none", "all", "new"],
                         help="none: full DS; all: every auxiliary branch reads detached features; "
-                             "new: detach only mg_scsf's margin branch (SCSF stays active)")
+                             "new: detach only the new DS branch from the backbone "
+                             "(mg_scsf margin / pd_scsf depth heads / ro_scsf risk head; SCSF stays active)")
     parser.add_argument("--ds-site", default="layer3+layer4", choices=["layer3", "layer4", "layer3+layer4"],
                         help="mp_ds/se_ds/ro_ds/ag_ds/cm_ds: backbone stages for the auxiliary branch (default layer3+layer4)")
     parser.add_argument("--mg-loss", default="hinge", choices=["hinge", "ce"],
@@ -223,6 +224,8 @@ def parse_args():
                         help="pd_scsf: TCP target p_L(y)^(1-beta) * mean_d q_d(y)^beta (0 = SCSF target)")
     parser.add_argument("--pd-target", default="depth", choices=["depth", "final"],
                         help="pd_scsf: depth-distilled TCP target, or SCSF's p_L(y) with the same heads (control)")
+    parser.add_argument("--pd-head-type", default="cosine", choices=["cosine", "linear"],
+                        help="pd_scsf: cosine classifier (default) or standard linear classifier on GAP features")
     parser.add_argument("--ts-reference", default="",
                         help="ts_scsf: aux_diagnostics.csv of the matched pd_scsf run (per-epoch mean target to match)")
     return parser.parse_args()
@@ -694,7 +697,10 @@ def main():
             f"lambda={args.meta_weight_mode}({args.init_meta_weight}->{args.min_meta_weight}) meta_lr={args.meta_lr}"
         )
         if args.method == "pd_scsf":
-            shape = f"head_dim={args.ds_head_dim} target={args.pd_target} beta={args.pd_beta} {scsf_shape}"
+            shape = (
+                f"head_dim={args.ds_head_dim} head_type={args.pd_head_type} "
+                f"target={args.pd_target} beta={args.pd_beta} {scsf_shape}"
+            )
         elif args.method == "ro_scsf":
             shape = (
                 f"head_dim={args.ds_head_dim} rank_w={args.ro_rank_weight} "

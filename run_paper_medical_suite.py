@@ -88,7 +88,8 @@ def parse_args():
     parser.add_argument("--ccl-momentum", type=float, default=0.999)
     # --- Single-view deep supervision (mg_scsf, mp_ds, se_ds); each listed value becomes a variant directory ---
     parser.add_argument("--ds-detach-modes", nargs="+", default=["none"], choices=["none", "all", "new"],
-                        help="none: full DS; all: All-DS-detached; new: detach only mg_scsf's margin branch "
+                        help="none: full DS; all: All-DS-detached; new: detach only the new DS branch "
+                             "(mg_scsf / pd_scsf / ro_scsf) from the backbone; SCSF stays active. "
                              "(skipped for mp_ds/se_ds, where it equals all)")
     parser.add_argument("--ds-sites", nargs="+", default=["layer3+layer4"], choices=["layer3", "layer4", "layer3+layer4"],
                         help="mp_ds/se_ds branch sites (mg_scsf's margin branch is always layer3)")
@@ -120,6 +121,8 @@ def parse_args():
     parser.add_argument("--pd-betas", nargs="+", type=float, default=[0.5])
     parser.add_argument("--pd-targets", nargs="+", default=["depth"], choices=["depth", "final"],
                         help="pd_scsf: depth-distilled TCP target, or the SCSF target with the same heads (control)")
+    parser.add_argument("--pd-head-types", nargs="+", default=["cosine"], choices=["cosine", "linear"],
+                        help="pd_scsf: cosine classifier (default) or standard linear classifier on GAP features")
     parser.add_argument("--ts-reference-variant", default="l23-tgtdepth-b0.5-d128__w0.1r5__detach-none",
                         help="ts_scsf: pd_scsf variant (same run) whose per-epoch mean target is matched")
     return parser.parse_args()
@@ -235,11 +238,20 @@ def method_variants(args, method: str) -> list[tuple[str, list[str]]]:
                 for pool in args.se_pools
             ]
         elif method == "pd_scsf":
-            heads = [
-                (f"tgt{target}-b{beta:g}-d{args.ds_head_dim}", ["--pd-target", target, "--pd-beta", str(beta)])
-                for target in args.pd_targets
-                for beta in (args.pd_betas if target == "depth" else [0.0])
-            ]
+            heads = []
+            for target in args.pd_targets:
+                for beta in (args.pd_betas if target == "depth" else [0.0]):
+                    for head_type in args.pd_head_types:
+                        # Keep cosine variant names unchanged for skip-existing compatibility.
+                        tag = f"tgt{target}-b{beta:g}-d{args.ds_head_dim}"
+                        if head_type != "cosine":
+                            tag = f"{tag}-{head_type}"
+                        heads.append(
+                            (
+                                tag,
+                                ["--pd-target", target, "--pd-beta", str(beta), "--pd-head-type", head_type],
+                            )
+                        )
         elif method in {"ro_ds", "ro_scsf"}:
             heads = [
                 (f"rank{weight:g}-d{args.ds_head_dim}", ["--ro-rank-weight", str(weight)])

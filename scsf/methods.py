@@ -26,7 +26,7 @@ FAITHFULNESS_NOTES = {
     "ro_ds": "ro_ds: Round-2 risk-ordered DS; one pooled cosine head on --ds-site (default layer3+layer4), CE(10a,y)+rank of final correct vs wrong margins; MSP primary, aux margin also reported.",
     "ag_ds": "ag_ds: Round-2 aligned-gradient DS; same cosine head as ro_ds with CE only; projects/caps aux grads vs main CE on shared backbone params; MSP primary, aux margin also reported.",
     "cm_ds": "cm_ds: Round-2 complement-masked DS; pointwise cosine head on spatial --ds-site maps, full CE + gated complement CE; MSP primary, full-aux margin also reported.",
-    "pd_scsf": "pd_scsf: Round-3 prediction-depth SCSF; SCSF (TCP head, Adam, cosine lambda, raw-logit score) + training-only pooled cosine heads on --pd-depths (default layer2+layer3), CE(10a,y) with backbone gradient scaled by alpha_e; TCP target p_L(y)^(1-beta) * mean_d q_d(y)^beta.",
+    "pd_scsf": "pd_scsf: Round-3 prediction-depth SCSF; SCSF (TCP head, Adam, cosine lambda, raw-logit score) + training-only pooled depth heads on --pd-depths (default layer2+layer3; --pd-head-type cosine|linear), CE on depth logits with backbone gradient scaled by alpha_e (0 under --ds-detach new/all); TCP target p_L(y)^(1-beta) * mean_d q_d(y)^beta.",
     "ts_scsf": "ts_scsf: Round-3 control for pd_scsf without deep supervision; plain SCSF whose TCP target is p_L(y)^(1-beta) * softmax(z/T)_y^beta, T solved per batch so the mean target matches the matched pd_scsf run's logged mean target per epoch.",
     "ro_scsf": "ro_scsf: Round-3 risk-ordered SCSF; SCSF (TCP head, Adam, cosine lambda, raw-logit score) + ro_ds's training-only pooled cosine head on --ds-site (default layer3+layer4, the stages the SCSF calibrator reads), CE(10a,y)+rank of final correct vs wrong margins.",
     "ccl_sc": "CCL-SC: --ccl-variant official reproduces lamda-bbo/CCL-SC train_CCL_SC.py + moco/CSC.py (per-epoch key EMA, queues frozen once full, max-shifted loss); --ccl-variant paper uses the paper's CSC loss with MoCo-style per-step updates.",
@@ -1368,6 +1368,24 @@ class PooledCosineDSHead(nn.Module):
         return _unit(hidden) @ _unit(self.class_weight).t()
 
 
+class PooledLinearDSHead(nn.Module):
+    """Standard linear classifier on pooled features: LayerNorm -> Linear -> ReLU -> Linear(num_classes)."""
+
+    def __init__(self, in_dim: int, hidden_dim: int, num_classes: int, init_seed: int):
+        super().__init__()
+        with isolated_init_rng(init_seed):
+            self.norm = nn.LayerNorm(in_dim)
+            self.proj = nn.Linear(in_dim, hidden_dim)
+            self.fc = nn.Linear(hidden_dim, num_classes)
+
+    def logits(self, pooled: torch.Tensor) -> torch.Tensor:
+        hidden = F.relu(self.proj(self.norm(pooled.float())))
+        return self.fc(hidden)
+
+
+PD_HEAD_TYPES = ("cosine", "linear")
+
+
 def pairwise_correctness_rank_loss(
     margins: torch.Tensor, correct: torch.Tensor, margin: float = 0.2, temperature: float = 0.1
 ) -> torch.Tensor:
@@ -1820,10 +1838,12 @@ class PDSCSFMethod(DSDiagnosticsMixin, SCSFMethod):
     On training data the final classifier interpolates (p_L(y) -> 1 for almost every sample), so
     SCSF's TCP target carries little ranking signal late in training. Shallower heads memorise less;
     how early a sample becomes predictable (its prediction depth) tracks its difficulty. Each depth d
-    gets a pooled cosine head trained with CE(10 a_d, y), and the TCP target becomes
-        t = p_L(y)^(1 - beta) * qbar(y)^beta,  qbar(y) = mean_d softmax(10 a_d)_y  (stop-gradient).
-    The heads always learn at full rate; their gradient into the backbone is scaled by alpha_e, so the
-    warm-up backbone matches SCSF exactly while the heads are already fitted when the TCP loss starts.
+    gets a pooled depth head (cosine by default, or a standard linear classifier) trained with CE, and
+    the TCP target becomes
+        t = p_L(y)^(1 - beta) * qbar(y)^beta,  qbar(y) = mean_d softmax(z_d)_y  (stop-gradient).
+    Cosine heads use logits 10 * cosine; linear heads use raw Linear logits. The heads always learn at
+    full rate; their gradient into the backbone is scaled by alpha_e, so the warm-up backbone matches
+    SCSF exactly while the heads are already fitted when the TCP loss starts.
     target="final" keeps the heads and their backbone gradient but uses SCSF's p_L(y) target (control).
     detach="new" stops only the heads' backbone gradient; "all" also detaches the calibrator features.
     Inference uses the raw SCSF logit; the depth-averaged probability of the prediction is aux_confidence.
@@ -1841,6 +1861,7 @@ class PDSCSFMethod(DSDiagnosticsMixin, SCSFMethod):
         train_size: int = 0,
         depths: str = "layer2+layer3",
         head_dim: int = 128,
+        head_type: str = "cosine",
         beta: float = 0.5,
         target: str = "depth",
         detach: str = "none",
@@ -1859,17 +1880,21 @@ class PDSCSFMethod(DSDiagnosticsMixin, SCSFMethod):
         _ds_detach_check(detach, "pd_scsf")
         if depths not in PD_DEPTHS:
             raise ValueError(f"Unknown --pd-depths '{depths}'; choose from {tuple(PD_DEPTHS)}")
+        if head_type not in PD_HEAD_TYPES:
+            raise ValueError(f"Unknown --pd-head-type '{head_type}'; choose from {PD_HEAD_TYPES}")
         if target not in {"depth", "final"}:
             raise ValueError(f"Unknown --pd-target '{target}'")
         if not 0.0 <= beta <= 1.0:
             raise ValueError(f"--pd-beta must be in [0, 1], got {beta}")
         self.depth_stages = PD_DEPTHS[depths]
+        self.head_type = head_type
         self.beta = beta
         self.target = target
         self.detach = detach
+        head_cls = PooledCosineDSHead if head_type == "cosine" else PooledLinearDSHead
         self.heads = nn.ModuleDict(
             {
-                stage: PooledCosineDSHead(backbone._stage_dims[stage], head_dim, num_classes, init_seed + i)
+                stage: head_cls(backbone._stage_dims[stage], head_dim, num_classes, init_seed + i)
                 for i, stage in enumerate(self.depth_stages)
             }
         )
@@ -1878,10 +1903,15 @@ class PDSCSFMethod(DSDiagnosticsMixin, SCSFMethod):
 
     def _depth_logits(self, pooled: dict[str, torch.Tensor], grad_scale: float) -> list[torch.Tensor]:
         with _fp32_region(next(iter(pooled.values())).device):
-            return [
-                self.logit_scale * self.heads[stage].similarities(_ScaleGrad.apply(pooled[stage].float(), grad_scale))
-                for stage in self.depth_stages
-            ]
+            out = []
+            for stage in self.depth_stages:
+                feats = _ScaleGrad.apply(pooled[stage].float(), grad_scale)
+                head = self.heads[stage]
+                if self.head_type == "cosine":
+                    out.append(self.logit_scale * head.similarities(feats))
+                else:
+                    out.append(head.logits(feats))
+            return out
 
     def forward(self, x: torch.Tensor) -> MethodBatchOutput:
         logits, features, maps = self.backbone.forward_with_maps(x)
@@ -2743,6 +2773,7 @@ def build_method(args, num_classes: int, input_size: int, train_size: int) -> Ex
             train_size=train_size,
             depths=args.pd_depths,
             head_dim=args.ds_head_dim,
+            head_type=getattr(args, "pd_head_type", "cosine"),
             beta=args.pd_beta,
             target=args.pd_target,
             detach=args.ds_detach,
