@@ -1,0 +1,8 @@
+{
+  "data_dir": "data",
+  "output_dir": "results/paper/medical_suite/dsspmi_new_ablations_v4/probes/E02",
+  "device": "cpu",
+  "workers": 4,
+  "test_release_lock": "results/paper/medical_suite/dsspmi_new_ablations_v4/config/test_release.json",
+  "checkpoints": []
+}

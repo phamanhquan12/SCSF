@@ -1,5 +1,7 @@
 # SCSF: Current Direction and Proposed Methods
 
+> Historical plan. The current proposal is [Four Deep-Supervision Methods for Medical Selective Classification](medical_deep_supervision_method_proposals.md). Its single-view training contract supersedes this document's requirement to retain two-view CE and agreement supervision. The original discussion is preserved below.
+
 **Project:** Thesis — selective classification through intermediate reliability supervision  
 **Prepared:** 2 October 2026, Asia/Bangkok  
 **Status:** Research plan; proposed methods have not been implemented or validated in this discussion.

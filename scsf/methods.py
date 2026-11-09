@@ -1811,7 +1811,17 @@ class CMDSMethod(DSDiagnosticsMixin, BackboneMethod):
 # --------------------------------------------------------------------------- #
 
 # Stages whose GAP feeds a pd_scsf depth head.
-PD_DEPTHS = {"layer2+layer3": ("early", "mid"), "layer3": ("mid",)}
+PD_DEPTHS = {"layer2+layer3": ("early", "mid"), "layer3": ("mid",), "layer2": ("early",)}
+
+
+def pd_aux_coefficient(epoch: int, args, schedule: str = "legacy") -> float:
+    if schedule == "legacy":
+        return ds_aux_coefficient(epoch, args)
+    if schedule == "step":
+        return 0.0 if epoch <= args.pretrain else float(args.ds_aux_weight)
+    if schedule == "early":
+        return float(args.ds_aux_weight)
+    raise ValueError(f"Unknown PD auxiliary-gradient schedule: {schedule}")
 
 
 class _ScaleGrad(torch.autograd.Function):
@@ -1866,6 +1876,9 @@ class PDSCSFMethod(DSDiagnosticsMixin, SCSFMethod):
         target: str = "depth",
         detach: str = "none",
         init_seed: int = 0,
+        target_aggregation: str = "geometric",
+        depth_weight_layer2: float = 0.5,
+        aux_gradient_schedule: str = "legacy",
     ):
         super().__init__(
             backbone,
@@ -1886,6 +1899,18 @@ class PDSCSFMethod(DSDiagnosticsMixin, SCSFMethod):
             raise ValueError(f"Unknown --pd-target '{target}'")
         if not 0.0 <= beta <= 1.0:
             raise ValueError(f"--pd-beta must be in [0, 1], got {beta}")
+        if target_aggregation not in {"geometric", "arithmetic"}:
+            raise ValueError("Unknown PD target aggregation")
+        if not math.isfinite(depth_weight_layer2) or not 0 <= depth_weight_layer2 <= 1:
+            raise ValueError("PD layer2 weight must be finite and in [0, 1]")
+        if depths != "layer2+layer3" and depth_weight_layer2 != 0.5:
+            raise ValueError("Nondefault layer2 weighting requires both depth heads")
+        if aux_gradient_schedule not in {"legacy", "step", "early"}:
+            raise ValueError("Unknown PD auxiliary-gradient schedule")
+        self.target_aggregation = target_aggregation
+        self.depth_weight_layer2 = depth_weight_layer2
+        self.aux_gradient_schedule = aux_gradient_schedule
+        self.emit_aux_confidence = True
         self.depth_stages = PD_DEPTHS[depths]
         self.head_type = head_type
         self.beta = beta
@@ -1900,6 +1925,11 @@ class PDSCSFMethod(DSDiagnosticsMixin, SCSFMethod):
         )
         self._depth_tcp: Optional[torch.Tensor] = None
         self._init_ds_logs()
+
+    def on_epoch_start(self, epoch: int, args):
+        super().on_epoch_start(epoch, args)
+        if self.aux_gradient_schedule == "early":
+            self._grad_log_pending = True
 
     def _depth_logits(self, pooled: dict[str, torch.Tensor], grad_scale: float) -> list[torch.Tensor]:
         with _fp32_region(next(iter(pooled.values())).device):
@@ -1916,9 +1946,10 @@ class PDSCSFMethod(DSDiagnosticsMixin, SCSFMethod):
     def forward(self, x: torch.Tensor) -> MethodBatchOutput:
         logits, features, maps = self.backbone.forward_with_maps(x)
         meta_logits = self.calibrator(features.detach() if self.detach == "all" else features, logits)
-        pooled = {stage: F.adaptive_avg_pool2d(maps[stage], (1, 1)).flatten(1) for stage in self.depth_stages}
+        pooled = ({stage: F.adaptive_avg_pool2d(maps[stage], (1, 1)).flatten(1) for stage in self.depth_stages}
+                  if self.training or self.emit_aux_confidence else {})
         aux_outputs = {"pooled": pooled}
-        if not self.training:
+        if not self.training and self.emit_aux_confidence:
             pred = logits.argmax(dim=1, keepdim=True)
             probs = [F.softmax(z, dim=1).gather(1, pred).squeeze(1) for z in self._depth_logits(pooled, 0.0)]
             aux_outputs["aux_confidence"] = torch.stack(probs).mean(dim=0)
@@ -1936,19 +1967,24 @@ class PDSCSFMethod(DSDiagnosticsMixin, SCSFMethod):
         final = super()._current_tcp(output, targets, probs)
         if self.target == "final":
             return final
+        if self.target_aggregation == "arithmetic":
+            return (1.0 - self.beta) * final + self.beta * self._depth_tcp
         return final.clamp_min(1e-6).pow(1.0 - self.beta) * self._depth_tcp.clamp_min(1e-6).pow(self.beta)
 
     def training_loss(self, output, targets, indices, epoch, args):
-        alpha = ds_aux_coefficient(epoch, args)
+        alpha = pd_aux_coefficient(epoch, args, self.aux_gradient_schedule)
         grad_scale = alpha if self.detach == "none" else 0.0
         depth_logits = self._depth_logits(output.aux_outputs["pooled"], grad_scale)
         with _fp32_region(targets.device):
             depth_ce = torch.stack([F.cross_entropy(z, targets) for z in depth_logits]).mean()
             with torch.no_grad():
                 depth_probs = [F.softmax(z, dim=1) for z in depth_logits]
-                self._depth_tcp = torch.stack(
-                    [p.gather(1, targets.unsqueeze(1)).squeeze(1) for p in depth_probs]
-                ).mean(dim=0)
+                true_probs = [p.gather(1, targets.unsqueeze(1)).squeeze(1) for p in depth_probs]
+                if len(true_probs) == 2 and self.depth_weight_layer2 != 0.5:
+                    w = self.depth_weight_layer2
+                    self._depth_tcp = w * true_probs[0] + (1.0 - w) * true_probs[1]
+                else:
+                    self._depth_tcp = torch.stack(true_probs).mean(dim=0)
         total = SCSFMethod.training_loss(self, output, targets, indices, epoch, args)
         if epoch > args.pretrain:
             with torch.no_grad():
@@ -1973,7 +2009,17 @@ class PDSCSFMethod(DSDiagnosticsMixin, SCSFMethod):
             )
             ce = F.cross_entropy(output.train_logits, targets)
             self._maybe_log_aux_grad({"ce": ce, "tcp": total - ce, "depth": depth_ce}, epoch)
+        if epoch <= args.pretrain and self.aux_gradient_schedule == "early":
+            self._maybe_log_aux_grad({"ce": total, "depth": depth_ce}, epoch)
         # Head parameters get the full CE gradient; the backbone sees alpha_e times it (0 in warm-up).
+        with torch.no_grad():
+            main_ce = ce.detach() if epoch > args.pretrain else total.detach()
+            self.last_loss_terms = {
+                "train_ce": float(main_ce), "depth_ce": float(depth_ce),
+                "weighted_confidence_loss": float(total - main_ce),
+                "meta_coefficient": SCSFMethod._meta_weight(epoch, args),
+                "aux_backbone_grad_scale": grad_scale,
+            }
         return total + depth_ce
 
     def _diagnostic_row(self, sums):
@@ -2772,6 +2818,9 @@ def build_method(args, num_classes: int, input_size: int, train_size: int) -> Ex
             calibrator_arch=getattr(args, "calibrator_arch", "standard"),
             train_size=train_size,
             depths=args.pd_depths,
+            target_aggregation=getattr(args, "pd_target_aggregation", "geometric"),
+            depth_weight_layer2=getattr(args, "pd_depth_weight_layer2", 0.5),
+            aux_gradient_schedule=getattr(args, "pd_aux_gradient_schedule", "legacy"),
             head_dim=args.ds_head_dim,
             head_type=getattr(args, "pd_head_type", "cosine"),
             beta=args.pd_beta,

@@ -117,7 +117,14 @@ def parse_args():
     parser.add_argument("--cm-topk-fraction", type=float, default=0.1)
     parser.add_argument("--cm-gate-prob", type=float, default=0.7)
     # --- Round 3 DS for the SCSF head (pd_scsf, ro_scsf); ro_scsf reuses --ds-sites/--ro-rank-weights ---
-    parser.add_argument("--pd-depths", nargs="+", default=["layer2+layer3"], choices=["layer2+layer3", "layer3"])
+    parser.add_argument("--pd-depths", nargs="+", default=["layer2+layer3"], choices=["layer2+layer3", "layer3", "layer2"])
+    parser.add_argument("--pd-target-aggregations", nargs="+", choices=["geometric", "arithmetic"], default=["geometric"])
+    parser.add_argument("--pd-depth-weight-layer2-values", nargs="+", type=float, default=[0.5])
+    parser.add_argument("--pd-aux-gradient-schedules", nargs="+", choices=["legacy", "step", "early"], default=["legacy"])
+    parser.add_argument("--defer-test-evaluation", action="store_true")
+    parser.add_argument("--evaluate-last-only", action="store_true")
+    parser.add_argument("--strict-run-contract", action="store_true")
+    parser.add_argument("--test-release-lock", default=None)
     parser.add_argument("--pd-betas", nargs="+", type=float, default=[0.5])
     parser.add_argument("--pd-targets", nargs="+", default=["depth"], choices=["depth", "final"],
                         help="pd_scsf: depth-distilled TCP target, or the SCSF target with the same heads (control)")
@@ -219,7 +226,7 @@ def method_variants(args, method: str) -> list[tuple[str, list[str]]]:
     if method in {"mg_scsf", "mp_ds", "se_ds", "ro_ds", "ag_ds", "cm_ds", "pd_scsf", "ro_scsf"}:
         # Directory = branch site, head setting, coefficient/ramp and gradient mode.
         schedule = f"w{args.ds_aux_weight:g}r{args.ds_aux_ramp}"
-        site_tags = {"layer3": "l3", "layer4": "l4", "layer3+layer4": "l34", "layer2+layer3": "l23"}
+        site_tags = {"layer3": "l3", "layer4": "l4", "layer3+layer4": "l34", "layer2+layer3": "l23", "layer2": "l2"}
         sites = {"mg_scsf": ["layer3"], "pd_scsf": args.pd_depths}.get(method, args.ds_sites)
         modes = [mode for mode in args.ds_detach_modes if mode != "new" or method in {"mg_scsf", "pd_scsf", "ro_scsf"}]
         if method == "mg_scsf":
@@ -284,6 +291,27 @@ def method_variants(args, method: str) -> list[tuple[str, list[str]]]:
                     if method in {"ro_ds", "ag_ds", "cm_ds"}:
                         name = f"{name}__score-{args.ds_primary_score}"
                     variants.append((name, [*flags, *site_flags, *primary_flags, "--ds-detach", mode]))
+        if method == "pd_scsf":
+            expanded = []
+            for name, flags in variants:
+                for aggregation in args.pd_target_aggregations:
+                    for weight in args.pd_depth_weight_layer2_values:
+                        for schedule in args.pd_aux_gradient_schedules:
+                            variant = name
+                            suffix = ""
+                            if aggregation != "geometric":
+                                suffix += f"-agg-{aggregation}"
+                            if weight != 0.5:
+                                suffix += f"-dw2-{weight:g}"
+                            variant = variant.replace("__w", suffix + "__w", 1)
+                            if schedule != "legacy":
+                                variant = variant.replace(f"__w{args.ds_aux_weight:g}r{args.ds_aux_ramp}", f"__sched-{schedule}-w{args.ds_aux_weight:g}")
+                            expanded.append((variant, flags + [
+                                "--pd-target-aggregation", aggregation,
+                                "--pd-depth-weight-layer2", str(weight),
+                                "--pd-aux-gradient-schedule", schedule,
+                            ]))
+            return expanded
         return variants
     return [("default", [])]
 
@@ -339,6 +367,10 @@ def train_command(
         "--variant",
         variant,
     ]
+    for flag in ("defer_test_evaluation", "evaluate_last_only", "strict_run_contract"):
+        if getattr(args, flag, False):
+            cmd.append("--" + flag.replace("_", "-"))
+    add_if_present(cmd, "--test-release-lock", args.test_release_lock)
     if args.download:
         cmd.append("--download")
     if args.force_preprocess:
@@ -548,7 +580,7 @@ def main():
             for variant, variant_flags in method_variants(args, method):
                 for seed in args.seeds:
                     cmd, _ = train_command(args, run_root, entry.slug, method, variant, variant_flags, seed)
-                    if args.skip_existing:
+                    if args.skip_existing and not args.strict_run_contract:
                         if is_complete(run_root, entry.slug, args.arch, method, variant, seed):
                             log_skip(f"SKIP complete {entry.slug}/{method}/{variant}/seed_{seed}", commands_file)
                             continue
@@ -556,7 +588,7 @@ def main():
                         cmd.append("--reuse-last")
                     run_command(cmd, commands_file, args.dry_run)
 
-    if not args.dry_run:
+    if not args.dry_run and not args.defer_test_evaluation:
         aggregate_tables(run_root)
     print(f"Paper medical suite outputs: {run_root}")
 

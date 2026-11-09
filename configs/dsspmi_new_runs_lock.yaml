@@ -1,0 +1,551 @@
+{
+  "schema": 1,
+  "source_baseline": "e9366ae87f2b838104c4c2fae4e0af88c160f663",
+  "protocol": {
+    "arch": "resnet50",
+    "pretrained": true,
+    "epochs": 100,
+    "pretrain": 20,
+    "batch_size": 64,
+    "eval_batch_size": 128,
+    "workers": 4,
+    "medical_split_seed": 42,
+    "amp": false,
+    "lr": 0.01,
+    "momentum": 0.9,
+    "weight_decay": 0.0005,
+    "milestones": [
+      40,
+      70,
+      90
+    ],
+    "lr_gamma": 0.1,
+    "meta_lr": 0.001,
+    "primary_score": "raw_meta_logit",
+    "checkpoint": "last"
+  },
+  "variants": [
+    {
+      "experiment": "E05",
+      "depths": "layer2",
+      "aggregation": "geometric",
+      "beta": 0.5,
+      "weight": 0.5,
+      "schedule": "legacy",
+      "variant": "l2-tgtdepth-b0.5-d128__w0.1r5__detach-none"
+    },
+    {
+      "experiment": "E06",
+      "depths": "layer2+layer3",
+      "aggregation": "arithmetic",
+      "beta": 0.5,
+      "weight": 0.5,
+      "schedule": "legacy",
+      "variant": "l23-tgtdepth-b0.5-d128-agg-arithmetic__w0.1r5__detach-none"
+    },
+    {
+      "experiment": "E07B",
+      "depths": "layer2+layer3",
+      "aggregation": "geometric",
+      "beta": 0.25,
+      "weight": 0.5,
+      "schedule": "legacy",
+      "variant": "l23-tgtdepth-b0.25-d128__w0.1r5__detach-none"
+    },
+    {
+      "experiment": "E07B",
+      "depths": "layer2+layer3",
+      "aggregation": "geometric",
+      "beta": 0.75,
+      "weight": 0.5,
+      "schedule": "legacy",
+      "variant": "l23-tgtdepth-b0.75-d128__w0.1r5__detach-none"
+    },
+    {
+      "experiment": "E07B",
+      "depths": "layer2+layer3",
+      "aggregation": "geometric",
+      "beta": 1.0,
+      "weight": 0.5,
+      "schedule": "legacy",
+      "variant": "l23-tgtdepth-b1-d128__w0.1r5__detach-none"
+    },
+    {
+      "experiment": "E07W",
+      "depths": "layer2+layer3",
+      "aggregation": "geometric",
+      "beta": 0.5,
+      "weight": 0.25,
+      "schedule": "legacy",
+      "variant": "l23-tgtdepth-b0.5-d128-dw2-0.25__w0.1r5__detach-none"
+    },
+    {
+      "experiment": "E07W",
+      "depths": "layer2+layer3",
+      "aggregation": "geometric",
+      "beta": 0.5,
+      "weight": 0.75,
+      "schedule": "legacy",
+      "variant": "l23-tgtdepth-b0.5-d128-dw2-0.75__w0.1r5__detach-none"
+    },
+    {
+      "experiment": "E09",
+      "depths": "layer2+layer3",
+      "aggregation": "geometric",
+      "beta": 0.5,
+      "weight": 0.5,
+      "schedule": "step",
+      "variant": "l23-tgtdepth-b0.5-d128__sched-step-w0.1__detach-none"
+    },
+    {
+      "experiment": "E09",
+      "depths": "layer2+layer3",
+      "aggregation": "geometric",
+      "beta": 0.5,
+      "weight": 0.5,
+      "schedule": "early",
+      "variant": "l23-tgtdepth-b0.5-d128__sched-early-w0.1__detach-none"
+    }
+  ],
+  "jobs": [
+    {
+      "variant": "l2-tgtdepth-b0.5-d128__w0.1r5__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 0
+    },
+    {
+      "variant": "l2-tgtdepth-b0.5-d128__w0.1r5__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 1
+    },
+    {
+      "variant": "l2-tgtdepth-b0.5-d128__w0.1r5__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 2
+    },
+    {
+      "variant": "l2-tgtdepth-b0.5-d128__w0.1r5__detach-none",
+      "dataset": "ham10000",
+      "seed": 0
+    },
+    {
+      "variant": "l2-tgtdepth-b0.5-d128__w0.1r5__detach-none",
+      "dataset": "ham10000",
+      "seed": 1
+    },
+    {
+      "variant": "l2-tgtdepth-b0.5-d128__w0.1r5__detach-none",
+      "dataset": "ham10000",
+      "seed": 2
+    },
+    {
+      "variant": "l2-tgtdepth-b0.5-d128__w0.1r5__detach-none",
+      "dataset": "aptos2019",
+      "seed": 0
+    },
+    {
+      "variant": "l2-tgtdepth-b0.5-d128__w0.1r5__detach-none",
+      "dataset": "aptos2019",
+      "seed": 1
+    },
+    {
+      "variant": "l2-tgtdepth-b0.5-d128__w0.1r5__detach-none",
+      "dataset": "aptos2019",
+      "seed": 2
+    },
+    {
+      "variant": "l2-tgtdepth-b0.5-d128__w0.1r5__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 0
+    },
+    {
+      "variant": "l2-tgtdepth-b0.5-d128__w0.1r5__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 1
+    },
+    {
+      "variant": "l2-tgtdepth-b0.5-d128__w0.1r5__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-agg-arithmetic__w0.1r5__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-agg-arithmetic__w0.1r5__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-agg-arithmetic__w0.1r5__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-agg-arithmetic__w0.1r5__detach-none",
+      "dataset": "ham10000",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-agg-arithmetic__w0.1r5__detach-none",
+      "dataset": "ham10000",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-agg-arithmetic__w0.1r5__detach-none",
+      "dataset": "ham10000",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-agg-arithmetic__w0.1r5__detach-none",
+      "dataset": "aptos2019",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-agg-arithmetic__w0.1r5__detach-none",
+      "dataset": "aptos2019",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-agg-arithmetic__w0.1r5__detach-none",
+      "dataset": "aptos2019",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-agg-arithmetic__w0.1r5__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-agg-arithmetic__w0.1r5__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-agg-arithmetic__w0.1r5__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b0.25-d128__w0.1r5__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b0.25-d128__w0.1r5__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b0.25-d128__w0.1r5__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b0.25-d128__w0.1r5__detach-none",
+      "dataset": "ham10000",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b0.25-d128__w0.1r5__detach-none",
+      "dataset": "ham10000",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b0.25-d128__w0.1r5__detach-none",
+      "dataset": "ham10000",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b0.25-d128__w0.1r5__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b0.25-d128__w0.1r5__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b0.25-d128__w0.1r5__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b0.75-d128__w0.1r5__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b0.75-d128__w0.1r5__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b0.75-d128__w0.1r5__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b0.75-d128__w0.1r5__detach-none",
+      "dataset": "ham10000",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b0.75-d128__w0.1r5__detach-none",
+      "dataset": "ham10000",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b0.75-d128__w0.1r5__detach-none",
+      "dataset": "ham10000",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b0.75-d128__w0.1r5__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b0.75-d128__w0.1r5__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b0.75-d128__w0.1r5__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b1-d128__w0.1r5__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b1-d128__w0.1r5__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b1-d128__w0.1r5__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b1-d128__w0.1r5__detach-none",
+      "dataset": "ham10000",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b1-d128__w0.1r5__detach-none",
+      "dataset": "ham10000",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b1-d128__w0.1r5__detach-none",
+      "dataset": "ham10000",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b1-d128__w0.1r5__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b1-d128__w0.1r5__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b1-d128__w0.1r5__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-dw2-0.25__w0.1r5__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-dw2-0.25__w0.1r5__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-dw2-0.25__w0.1r5__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-dw2-0.25__w0.1r5__detach-none",
+      "dataset": "ham10000",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-dw2-0.25__w0.1r5__detach-none",
+      "dataset": "ham10000",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-dw2-0.25__w0.1r5__detach-none",
+      "dataset": "ham10000",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-dw2-0.25__w0.1r5__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-dw2-0.25__w0.1r5__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-dw2-0.25__w0.1r5__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-dw2-0.75__w0.1r5__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-dw2-0.75__w0.1r5__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-dw2-0.75__w0.1r5__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-dw2-0.75__w0.1r5__detach-none",
+      "dataset": "ham10000",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-dw2-0.75__w0.1r5__detach-none",
+      "dataset": "ham10000",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-dw2-0.75__w0.1r5__detach-none",
+      "dataset": "ham10000",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-dw2-0.75__w0.1r5__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-dw2-0.75__w0.1r5__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128-dw2-0.75__w0.1r5__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128__sched-step-w0.1__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128__sched-step-w0.1__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128__sched-step-w0.1__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128__sched-step-w0.1__detach-none",
+      "dataset": "ham10000",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128__sched-step-w0.1__detach-none",
+      "dataset": "ham10000",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128__sched-step-w0.1__detach-none",
+      "dataset": "ham10000",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128__sched-step-w0.1__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128__sched-step-w0.1__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128__sched-step-w0.1__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128__sched-early-w0.1__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128__sched-early-w0.1__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128__sched-early-w0.1__detach-none",
+      "dataset": "covid_qu_ex",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128__sched-early-w0.1__detach-none",
+      "dataset": "ham10000",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128__sched-early-w0.1__detach-none",
+      "dataset": "ham10000",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128__sched-early-w0.1__detach-none",
+      "dataset": "ham10000",
+      "seed": 2
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128__sched-early-w0.1__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 0
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128__sched-early-w0.1__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 1
+    },
+    {
+      "variant": "l23-tgtdepth-b0.5-d128__sched-early-w0.1__detach-none",
+      "dataset": "chest_ct_scan",
+      "seed": 2
+    }
+  ],
+  "stage1_count": 18,
+  "full_count": 87,
+  "continuation": "health_only",
+  "test_policy": "deferred_until_release"
+}

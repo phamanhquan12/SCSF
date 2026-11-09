@@ -27,3 +27,5 @@ dogs-vs-cats/
 dist/
 build/
 .eggs/
+
+AGENTS.md

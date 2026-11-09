@@ -1,0 +1,5 @@
+{
+  "schema": 1,
+  "references": [],
+  "instructions": "Add each dataset/seed/full reference, plus layer3 for E05 and final-TCP for E07B. Each entry needs dataset, seed (integer), method=pd_scsf, variant, checkpoint (original last.pt path), provenance (original checkpoint-bound JSON evidence path with checkpoint_sha256 and data_sha256). Missing historic split evidence blocks the comparison; do not manufacture evidence by hashing only today's cache."
+}

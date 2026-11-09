@@ -218,8 +218,15 @@ def parse_args():
     parser.add_argument("--cm-topk-fraction", type=float, default=0.1, help="cm_ds: fraction of spatial locations erased")
     parser.add_argument("--cm-gate-prob", type=float, default=0.7, help="cm_ds: min true-class probability to activate complement CE")
     # --- Round 3 DS for the SCSF head: pd_scsf / ro_scsf (ro_scsf reuses --ds-site, --ds-head-dim, --ro-rank-*) ---
-    parser.add_argument("--pd-depths", default="layer2+layer3", choices=["layer2+layer3", "layer3"],
+    parser.add_argument("--pd-depths", default="layer2+layer3", choices=["layer2+layer3", "layer3", "layer2"],
                         help="pd_scsf: stages that get a training-only depth head")
+    parser.add_argument("--pd-target-aggregation", choices=["geometric", "arithmetic"], default="geometric")
+    parser.add_argument("--pd-depth-weight-layer2", type=float, default=0.5)
+    parser.add_argument("--pd-aux-gradient-schedule", choices=["legacy", "step", "early"], default="legacy")
+    parser.add_argument("--defer-test-evaluation", action="store_true")
+    parser.add_argument("--evaluate-last-only", action="store_true")
+    parser.add_argument("--strict-run-contract", action="store_true")
+    parser.add_argument("--test-release-lock", default=None)
     parser.add_argument("--pd-beta", type=float, default=0.5,
                         help="pd_scsf: TCP target p_L(y)^(1-beta) * mean_d q_d(y)^beta (0 = SCSF target)")
     parser.add_argument("--pd-target", default="depth", choices=["depth", "final"],
@@ -255,6 +262,7 @@ def train_one_epoch(model, loader, optimizer, meta_optimizer, scaler, device, ep
     total_loss = 0.0
     total_acc = 0.0
     total_seen = 0
+    terms = {}
     use_amp = bool(args.amp and device.type == "cuda")
     def has_grad(opt):
         return any(p.grad is not None for group in opt.param_groups for p in group["params"])
@@ -280,6 +288,10 @@ def train_one_epoch(model, loader, optimizer, meta_optimizer, scaler, device, ep
             output = model(inputs)
             loss = model.training_loss(output, targets, indices, epoch, args)
 
+        if not bool(torch.isfinite(loss)):
+            raise FloatingPointError(f"Nonfinite loss at epoch {epoch}")
+        for key, value in getattr(model, "last_loss_terms", {}).items():
+            terms[key] = terms.get(key, 0.0) + value * targets.size(0)
         if scaler is not None and use_amp:
             scaler.scale(loss).backward()
             if has_grad(optimizer):
@@ -298,6 +310,7 @@ def train_one_epoch(model, loader, optimizer, meta_optimizer, scaler, device, ep
         total_loss += loss.item() * batch_size
         total_acc += accuracy(output.eval_logits.detach(), targets) * batch_size
         total_seen += batch_size
+    model.epoch_loss_terms = {k: v / total_seen for k, v in terms.items()}
     return total_loss / total_seen, total_acc / total_seen
 
 
@@ -325,6 +338,8 @@ def collect_outputs(model, loader, device):
     for batch in loader:
         inputs, targets, _ = unpack_batch(batch, device)
         output = model(inputs)
+        if not bool(torch.isfinite(output.eval_logits).all()) or not bool(torch.isfinite(output.confidence).all()):
+            raise FloatingPointError("Nonfinite evaluation logits/confidence")
         logits_all.append(output.eval_logits.cpu())
         targets_all.append(targets.cpu())
         confidence_all.append(output.confidence.cpu())
@@ -459,6 +474,8 @@ def save_root_for(args) -> Path:
 
 def metrics_root_for(args, checkpoint_name: str, save_root: Path) -> Path:
     if args.metrics_dir is None:
+        if getattr(args, "strict_run_contract", False) or getattr(args, "defer_test_evaluation", False):
+            return save_root / checkpoint_name
         return save_root
     if args.output_layout == "paper":
         return Path(args.metrics_dir) / args.dataset / args.arch / args.method / args.variant / f"seed_{args.seed}" / checkpoint_name
@@ -590,6 +607,17 @@ def write_fusion_diagnostics(args, model, loader, device, output_dir: Path, chec
 
 def main():
     args = parse_args()
+    wall_start = time.perf_counter()
+    if args.defer_test_evaluation and args.evaluate_last_only:
+        raise ValueError("Choose training deferral or evaluation-only, not both")
+    strict = args.strict_run_contract or args.defer_test_evaluation or args.evaluate_last_only
+    if strict and (args.download or args.force_preprocess):
+        raise ValueError("Contract runs require an existing immutable cache; download/rebuild disabled")
+    if strict:
+        from scsf.dsspmi_contract import (audit_cache, run_contract, require_contract,
+                                         atomic_json, file_sha256, require_release)
+        data_identity = audit_cache(args.data_dir, args.dataset, args.input_size or 224,
+                                    args.medical_split_seed)
     set_seed(args.seed)
     if args.gpu is not None:
         import os
@@ -606,6 +634,34 @@ def main():
             f"test={len(loaders['test'].dataset)}"
         )
         return
+
+    contract = run_contract(args, data_identity) if strict else None
+    save_root = save_root_for(args)
+    trained_marker = save_root / "trained_complete.json"
+    if strict and trained_marker.exists():
+        marker = json.loads(trained_marker.read_text())
+        require_contract(marker.get("contract"), contract)
+        if marker.get("checkpoint_sha256") != file_sha256(save_root / "last.pt"):
+            raise ValueError("Completed checkpoint contents changed")
+        if not args.evaluate_last_only:
+            print(f"SKIP trained and compatible: {save_root}")
+            return
+    if args.evaluate_last_only:
+        if not trained_marker.exists():
+            raise ValueError("Evaluation-only requires a verified trained_complete marker")
+        require_release(args.test_release_lock, contract["sha256"],
+                        file_sha256(save_root / "last.pt"))
+        completed = save_root / COMPLETE_MARKER
+        if completed.exists():
+            require_contract(json.loads(completed.read_text()).get("contract"), contract)
+            metrics = metrics_root_for(args, "last", save_root)
+            if all((metrics / name).is_file() and (metrics / name).stat().st_size
+                   for name in ("summary.csv", "risk_coverage.csv", "roc_curve.csv", "per_sample.csv")):
+                print(f"SKIP already evaluated: {save_root}")
+                return
+            print("Repairing incomplete official evaluation from the frozen checkpoint")
+    elif strict and save_root.exists() and any(save_root.iterdir()):
+        raise ValueError(f"Incomplete output exists: {save_root}. Preserve it under another path before restarting.")
 
     model = build_method(args, num_classes=num_classes, input_size=spec.input_size, train_size=len(loaders["train"].dataset)).to(device)
     if args.method in {"scsf", "dualaug", "mg_scsf", "pd_scsf", "ro_scsf", "ts_scsf"}:
@@ -638,6 +694,23 @@ def main():
             weight_decay=args.weight_decay,
         )
         meta_optimizer = None
+    if strict:
+        from scsf.dsspmi_contract import source_identity
+        environment = {"source": source_identity(), "device": str(device),
+                       "gpu_name": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
+                       "optimizer_groups": [{"type": type(opt).__name__,
+                           "groups": [{"lr": g["lr"], "weight_decay": g.get("weight_decay", 0),
+                                       "parameter_count": sum(p.numel() for p in g["params"])}
+                                      for g in opt.param_groups]}
+                                      for opt in (optimizer, meta_optimizer) if opt is not None]}
+        if args.pretrained and args.arch == "resnet50":
+            from torchvision.models import ResNet50_Weights
+            weight = ResNet50_Weights.DEFAULT
+            weight_path = Path(torch.hub.get_dir()) / "checkpoints" / Path(weight.url).name
+            environment["pretrained_weight"] = {"identifier": str(weight), "url": weight.url,
+                "sha256": file_sha256(weight_path) if weight_path.is_file() else None}
+        if not args.evaluate_last_only:
+            atomic_json(save_root / "run_environment.json", environment)
     scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=args.milestones, gamma=args.lr_gamma)
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
 
@@ -760,10 +833,24 @@ def main():
     best_aurc = float("inf")
     save_root = save_root_for(args)
     save_root.mkdir(parents=True, exist_ok=True)
-    for stale in (COMPLETE_MARKER, LEGACY_LAST_OUTPUT):
-        (save_root / stale).unlink(missing_ok=True)
-    reused = args.reuse_last and load_last_checkpoint(model, save_root / "last.pt", args, device)
+    if not strict:
+        for stale in (COMPLETE_MARKER, LEGACY_LAST_OUTPUT):
+            (save_root / stale).unlink(missing_ok=True)
+    if strict:
+        atomic_json(save_root / "run_contract.json", {"contract": contract, "data": data_identity})
+    if args.evaluate_last_only:
+        checkpoint = torch.load(save_root / "last.pt", map_location=device, weights_only=False)
+        require_contract(checkpoint.get("contract"), contract)
+        if checkpoint.get("epoch") != args.epochs or checkpoint.get("checkpoint_type") != "last":
+            raise ValueError("Expected finished last checkpoint")
+        model.load_state_dict(checkpoint["model"], strict=True)
+        reused = True
+    else:
+        reused = args.reuse_last and not strict and load_last_checkpoint(model, save_root / "last.pt", args, device)
     train_seconds = 0.0
+    history = []
+    validation_seconds = 0.0
+    checkpoint_seconds = 0.0
     for epoch in range(1, 0 if reused else args.epochs + 1):
         freeze_scsf_backbone_if_needed(model, epoch, args)
         epoch_start = time.perf_counter()
@@ -773,6 +860,7 @@ def main():
         print(f"Epoch {epoch:03d} train time {epoch_seconds:.1f}s")
         scheduler.step()
         should_eval = args.eval_every <= 1 or epoch % args.eval_every == 0 or epoch == args.epochs
+        validation_start = time.perf_counter()
         if should_eval:
             val_acc, val_curve, val_summary = evaluate(model, loaders["val"], device)
             val_aurc = val_summary.aurc
@@ -783,7 +871,8 @@ def main():
             )
             if val_aurc < best_aurc:
                 best_aurc = val_aurc
-                torch.save(
+                best_checkpoint_start = time.perf_counter()
+                atomic_torch_save(
                     {
                         "model": model.state_dict(),
                         "args": vars(args),
@@ -794,6 +883,7 @@ def main():
                     },
                     save_root / "best.pt",
                 )
+                checkpoint_seconds += time.perf_counter() - best_checkpoint_start
                 write_results(save_root / "val_curve.csv", [r.__dict__ for r in val_curve])
                 write_summary_csv(
                     save_root / "val_summary.csv",
@@ -814,7 +904,17 @@ def main():
                 f"loss={train_loss:.4f} train_acc={train_acc:.2f} val=skipped"
             )
 
+        val_seconds = time.perf_counter() - validation_start
+        validation_seconds += val_seconds
+        history.append({"epoch": epoch, "train_loss": train_loss, "train_accuracy": train_acc,
+                        "epoch_train_seconds": epoch_seconds, "epoch_validation_seconds": val_seconds,
+                        "validation_aurc": val_aurc if should_eval else None,
+                        "validation_accuracy": val_acc if should_eval else None,
+                        "finite_loss": True, **getattr(model, "epoch_loss_terms", {})})
+        write_dict_csv(save_root / "train_history.csv", history)
+
     if not reused:
+        checkpoint_start = time.perf_counter()
         atomic_torch_save(
             {
                 "model": model.state_dict(),
@@ -823,10 +923,28 @@ def main():
                 "epoch": args.epochs,
                 "best_val_aurc": best_aurc,
                 "checkpoint_type": "last",
+                "contract": contract,
             },
             save_root / "last.pt",
         )
         write_aux_grad_log(model, save_root)
+        checkpoint_seconds += time.perf_counter() - checkpoint_start
+    if strict:
+        final_data = audit_cache(args.data_dir, args.dataset, args.input_size or 224, args.medical_split_seed)
+        if final_data["sha256"] != data_identity["sha256"]:
+            raise ValueError("Data cache changed during run")
+    if args.defer_test_evaluation:
+        val_logits, val_targets, val_confidence, val_aux = collect_outputs(model, loaders["val"], device)
+        write_rich_evaluation(args, save_root, "val_last", val_logits, val_targets, val_confidence, val_aux)
+        write_fusion_diagnostics(args, model, loaders["val"], device,
+                                 metrics_root_for(args, "val_last", save_root), "val_last")
+        atomic_json(trained_marker, {"contract": contract, "checkpoint_sha256": file_sha256(save_root / "last.pt"),
+                    "epoch": args.epochs, "trained_complete": True, "evaluated_complete": False,
+                    "train_seconds": train_seconds, "validation_seconds": validation_seconds,
+                    "checkpoint_seconds": checkpoint_seconds,
+                    "total_wall_seconds": time.perf_counter() - wall_start})
+        print("Training complete; official test evaluation deferred.")
+        return
     logits, targets, confidence, aux_confidence = collect_outputs(model, loaders["test_full"], device)
     test_summary, test_curve = write_rich_evaluation(
         args, save_root, "last", logits, targets, confidence, aux_confidence
@@ -843,6 +961,11 @@ def main():
     )
     print(f"Coverage error: {format_curve(test_curve)}")
     write_completion_marker(save_root, args, reused, train_seconds)
+    if strict:
+        marker = json.loads((save_root / COMPLETE_MARKER).read_text())
+        marker.update(contract=contract, checkpoint_sha256=file_sha256(save_root / "last.pt"),
+                      trained_complete=True, evaluated_complete=True)
+        atomic_json(save_root / COMPLETE_MARKER, marker)
 
 
 if __name__ == "__main__":
