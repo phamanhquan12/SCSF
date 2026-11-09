@@ -57,6 +57,27 @@ class ContractTests(unittest.TestCase):
                 writer=csv.DictWriter(f,fieldnames=list(rows[0]));writer.writeheader();writer.writerows(rows)
             with self.assertRaises(ValueError): audit_cache(root,'ham10000')
 
+    def test_cross_split_duplicates_policy(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); cache=self.make_cache(root)
+            (cache/'test/a/sample.png').write_bytes((cache/'train/a/sample.png').read_bytes())
+            with patch.dict(os.environ, {'DSSPMI_MAX_CROSS_SPLIT_DUPLICATES': '0'}):
+                with self.assertRaises(ValueError): audit_cache(root,'ham10000')
+            with patch.dict(os.environ, {'DSSPMI_MAX_CROSS_SPLIT_DUPLICATES': '1'}):
+                data=audit_cache(root,'ham10000')
+            self.assertEqual(data['identity']['cross_split_duplicates'], ['test/a/sample.png'])
+
+    def test_source_fingerprint_ignores_commit_and_legacy_pd_args(self):
+        from scsf import dsspmi_contract as c
+        with patch.object(c, '_git', return_value=b'deadbeef'):
+            a=c.run_contract(SimpleNamespace(dataset='ham10000'), {'sha256':'x'})
+        with patch.object(c, '_git', return_value=b'cafef00d'):
+            b=c.run_contract(SimpleNamespace(dataset='ham10000'), {'sha256':'x'})
+        self.assertEqual(a['sha256'], b['sha256'])  # a new commit must not invalidate trained runs
+        legacy=c.normalized_config({'dataset':'ham10000'})
+        self.assertEqual(legacy['pd_head_type'], 'cosine')
+
     def test_config_mutations_rejected(self):
         from scsf.dsspmi_contract import run_contract
         base=SimpleNamespace(dataset='ham10000', pd_beta=.5, pd_target_aggregation='geometric',

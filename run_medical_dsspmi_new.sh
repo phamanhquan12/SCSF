@@ -23,6 +23,9 @@ cd "$SCRIPT_DIR"
 RUN_ID="${RUN_ID:-dsspmi_new_ablations_v4}"
 RESULTS_ROOT="${RESULTS_ROOT:-$SCRIPT_DIR/results/paper/medical_suite}"
 DATA_DIR="${DATA_DIR:-$SCRIPT_DIR/data}"
+# Covid-QU-Ex ships 3 cross-split duplicate image files (2 distinct contents) that the historic round3 runs were trained
+# on; keep the split identical for a fair comparison. They are recorded in the run contract.
+export DSSPMI_MAX_CROSS_SPLIT_DUPLICATES="${DSSPMI_MAX_CROSS_SPLIT_DUPLICATES:-3}"
 
 find_python() {
     if [[ -n "${VIRTUAL_ENV:-}" ]]; then echo "$VIRTUAL_ENV/bin/python"

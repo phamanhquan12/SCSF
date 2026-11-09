@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import platform
@@ -14,6 +15,8 @@ PD_DEFAULTS = {
     "pd_aux_gradient_schedule": "legacy", "calibrator_arch": "standard",
     "tcp_ema_momentum": 0.0, "meta_weight_warmup_fraction": 0.0,
     "meta_focal_gamma": 0.0,
+    # Added after the first Round-3 runs; older checkpoints always used the cosine head.
+    "pd_head_type": "cosine",
 }
 RUNTIME_KEYS = {
     "gpu", "save_dir", "metrics_dir", "figures_dir", "output_layout", "variant",
@@ -35,6 +38,19 @@ def file_sha256(path):
     return result.hexdigest()
 
 
+_HASH_CACHE = {}
+
+
+def cached_file_sha256(path):
+    """file_sha256 memoised per process; invalidated when size or mtime change."""
+    path = Path(path)
+    stat = path.stat()
+    key = (str(path), stat.st_size, stat.st_mtime_ns)
+    if key not in _HASH_CACHE:
+        _HASH_CACHE[key] = file_sha256(path)
+    return _HASH_CACHE[key]
+
+
 def atomic_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -49,10 +65,36 @@ def normalized_config(args):
     return {k: v for k, v in values.items() if k not in RUNTIME_KEYS}
 
 
+CODE_FILES = ("run_experiment.py", "run_paper_medical_suite.py", "run_medical_suite.sh")
+CODE_EXCLUDE = {"dsspmi_campaign.py"}  # launcher only; it does not change training results
+
+
+def code_sha256():
+    """Hash of the training-relevant source contents (independent of git history)."""
+    root = Path(__file__).resolve().parents[1]
+    files = [root / name for name in CODE_FILES]
+    files += sorted(p for p in (root / "scsf").glob("*.py") if p.name not in CODE_EXCLUDE)
+    result = hashlib.sha256()
+    for path in files:
+        result.update(path.relative_to(root).as_posix().encode() + b"\0")
+        result.update(path.read_bytes() + b"\0")
+    return result.hexdigest()
+
+
+def _git(*args):
+    try:
+        return subprocess.check_output(["git", *args], cwd=Path(__file__).resolve().parents[1],
+                                       stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError):
+        return b""
+
+
 def source_identity():
-    # Dirty source is recorded for development; production preflight rejects it.
-    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-    diff = subprocess.check_output(["git", "diff", "HEAD", "--", "*.py", "*.sh"])
+    """code_sha256 + environment are fingerprinted; commit/diff are recorded for provenance only.
+
+    Fingerprinting the commit hash would invalidate every trained checkpoint after any
+    unrelated commit (e.g. docs), so reuse is keyed on the code contents instead.
+    """
     environment = {"python": platform.python_version()}
     for name in ("torch", "torchvision", "numpy"):
         module = sys.modules.get(name)
@@ -65,8 +107,25 @@ def source_identity():
                            tf32_cudnn=torch.backends.cudnn.allow_tf32,
                            cudnn_benchmark=torch.backends.cudnn.benchmark,
                            cudnn_deterministic=torch.backends.cudnn.deterministic)
-    return {"commit": commit, "tracked_diff_sha256": hashlib.sha256(diff).hexdigest(),
-            "environment": environment}
+    return {"code_sha256": code_sha256(), "environment": environment,
+            "commit": _git("rev-parse", "HEAD").decode().strip() or None,
+            "tracked_diff_sha256": hashlib.sha256(_git("diff", "HEAD", "--", "*.py", "*.sh")).hexdigest()}
+
+
+def fingerprinted_source():
+    source = source_identity()
+    return {"code_sha256": source["code_sha256"], "environment": source["environment"]}
+
+
+def max_cross_split_duplicates():
+    """Tolerated count of identical-content images that appear in more than one split.
+
+    Default 0 (strict). Some public datasets (e.g. Covid-QU-Ex) ship a few cross-split
+    duplicates; historic runs were trained on them, so a campaign comparing against those
+    runs must keep the split. Raise via DSSPMI_MAX_CROSS_SPLIT_DUPLICATES; the exact
+    duplicates are recorded in the data identity (and therefore in the run contract).
+    """
+    return int(os.environ.get("DSSPMI_MAX_CROSS_SPLIT_DUPLICATES", "0"))
 
 
 def audit_cache(data_dir, dataset, input_size=224, split_seed=42):
@@ -84,6 +143,7 @@ def audit_cache(data_dir, dataset, input_size=224, split_seed=42):
     if not rows:
         raise ValueError("Empty split manifest")
     ids, source_splits, content_splits, counts = {}, {}, {}, {}
+    cross_split = []
     classes = {}
     aliases = ("adenocarcinoma", "large.cell.carcinoma", "normal", "squamous.cell.carcinoma")
     for split in ("train", "val", "test"):
@@ -117,18 +177,27 @@ def audit_cache(data_dir, dataset, input_size=224, split_seed=42):
         previous = source_splits.setdefault(source, split)
         if previous != split:
             raise ValueError(f"Source overlaps splits: {source}")
-        content = file_sha256(path)
+        content = cached_file_sha256(path)
         previous = content_splits.setdefault(content, split)
         if previous != split:
-            raise ValueError(f"Image content overlaps splits: {sample_id}")
+            cross_split.append(sample_id)
         ids[sample_id] = content
         counts[split] = counts.get(split, 0) + 1
     actual = {p.relative_to(root).as_posix() for split in classes
               for p in (root / split).rglob("*") if p.is_file()}
     if set(ids) != actual:
         raise ValueError("Cache directories differ from split manifest")
+    allowed = max_cross_split_duplicates()
+    if len(cross_split) > allowed:
+        raise ValueError(f"Image content overlaps splits ({len(cross_split)} > allowed {allowed}); "
+                         f"first: {cross_split[0]}. Deduplicate the cache or set "
+                         "DSSPMI_MAX_CROSS_SPLIT_DUPLICATES to accept the known historic duplicates.")
+    if cross_split:
+        print(f"WARNING: {dataset}: {len(cross_split)} cross-split duplicate image(s) accepted: {sorted(cross_split)}",
+              file=sys.stderr)
     payload = {"dataset": dataset, "input_size": input_size, "split_seed": split_seed,
                "classes": classes, "counts": counts, "samples": ids,
+               "cross_split_duplicates": sorted(cross_split),
                "mean": metadata["mean"], "std": metadata["std"],
                "transform": f"resize-shorter/randomcrop-padding{max(4, input_size // 10)}/hflip;eval-centercrop;RGB;v1"}
     return {"sha256": digest(payload), "manifest_sha256": file_sha256(manifest),
@@ -140,7 +209,7 @@ def run_contract(args, data):
     classes = data.get("identity", {}).get("classes", {}).get("train")
     payload = {"effective_config": effective, "data_sha256": data["sha256"],
                "num_classes": len(classes) if classes is not None else None,
-               "source": source_identity()}
+               "source": fingerprinted_source()}
     return {**payload, "sha256": digest(payload)}
 
 
